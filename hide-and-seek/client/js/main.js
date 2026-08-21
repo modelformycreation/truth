@@ -120,7 +120,9 @@ function startLoop() {
         minimap.showTeammates = cfg.minimapShowTeammates ?? true;
         minimap.showFound = cfg.minimapShowFound ?? true;
         minimap.draw(controller.pos, controller.camYaw, snap.pl ?? [], store.get().myTeam, store.get().myStatus);
-        $('floor-tag').textContent = controller.pos[1] < -1.5 ? 'B1 ARCHIVES' : controller.pos[1] > 4 ? 'ROOFTOP' : 'GROUND';
+        if (!settings.showFps) {
+          $('floor-tag').textContent = controller.pos[1] < -1.5 ? 'B1 ARCHIVES' : controller.pos[1] > 4 ? 'ROOFTOP' : 'GROUND';
+        }
       }
     }
     remotes?.update(dt, now);
@@ -396,12 +398,10 @@ for (const evName of ['pointerdown', 'touchstart']) {
   window.addEventListener(evName, () => audio.unlock(), { once: true });
 }
 
-// FPS display
+// FPS display (setting: showFps)
 setInterval(() => {
   if (settings.showFps && world) {
-    // cheap: reuse the timer pill title
-    $('pill-timer').title = `${fpsCounter.value} fps`;
-    $('floor-tag').textContent = `${fpsCounter.value}fps`;
+    $('floor-tag').textContent = `${fpsCounter.value} fps`;
   }
 }, 1000);
 
