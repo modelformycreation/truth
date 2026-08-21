@@ -1,0 +1,26 @@
+{
+  "name": "shadowsite-hide-and-seek",
+  "version": "0.1.0",
+  "description": "Multiplayer virtual hide-and-seek: authoritative Node.js server + Three.js mobile-first web client + team voice chat",
+  "type": "module",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "test": "node --test \"test/**/*.test.js\"",
+    "test:unit": "node --test \"test/unit/**/*.test.js\"",
+    "test:integration": "node --test \"test/integration/**/*.test.js\"",
+    "verify:map": "node tools/verify-map.mjs"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "socket.io": "^4.8.1"
+  },
+  "devDependencies": {
+    "socket.io-client": "^4.8.1",
+    "three": "^0.170.0"
+  },
+  "license": "MIT"
+}
