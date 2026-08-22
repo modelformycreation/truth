@@ -13,16 +13,19 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { TEAMS } from '../../shared/constants.js';
 
-// canvas stub: createAvatar draws a nameplate with 2D-context calls
-const fakeCtx = {
-  clearRect: () => {}, measureText: (s) => ({ width: s.length * 12 }),
-  beginPath: () => {}, roundRect: () => {}, rect: () => {},
-  fill: () => {}, fillText: () => {},
-  set fillStyle(v) {}, get fillStyle() { return ''; },
-  set font(v) {}, get font() { return ''; },
-  set textAlign(v) {}, get textAlign() { return ''; },
-  set textBaseline(v) {}, get textBaseline() { return ''; },
-};
+// canvas stub: createAvatar draws a nameplate AND a painted face texture,
+// both via 2D-context calls. A Proxy no-op stub covers any method/property.
+const gradientStub = { addColorStop: () => {} };
+const fakeCtx = new Proxy({}, {
+  get(t, prop) {
+    if (prop === 'createLinearGradient' || prop === 'createRadialGradient') return () => gradientStub;
+    if (prop === 'measureText') return (s) => ({ width: String(s).length * 12 });
+    if (prop === 'canvas') return { width: 512, height: 256 };
+    if (typeof prop === 'string' && !(prop in t)) t[prop] = () => {};
+    return t[prop];
+  },
+  set(t, prop, v) { t[prop] = v; return true; },
+});
 globalThis.document = globalThis.document ?? {
   createElement: () => ({ width: 0, height: 0, getContext: () => fakeCtx }),
 };

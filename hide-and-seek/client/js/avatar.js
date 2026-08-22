@@ -112,8 +112,80 @@ function m(parent, geo, mtl, x = 0, y = 0, z = 0, sx = 1, sy = 1, sz = 1) {
   parent.add(mesh);
   return mesh;
 }
-const mat = (color, extra = {}) => new THREE.MeshLambertMaterial({ color, ...extra });
+// Standard (PBR-ish) materials read as much less "toy" than flat Lambert under
+// the map's key + fill lighting. roughness per surface type.
+const mat = (color, extra = {}) =>
+  new THREE.MeshStandardMaterial({ color, roughness: 0.85, metalness: 0.0, ...extra });
 const shade = (hex, k) => new THREE.Color(hex).multiplyScalar(k);
+const hex3 = (hex) => '#' + hex.toString(16).padStart(6, '0');
+
+// ---- painted face texture ----------------------------------------------------
+// A canvas-painted face (eyes, brows, nose, mouth, cheek shading) mapped onto
+// the head sphere. The -Z face of a three.js sphere sits at u = 0.75, so all
+// features are drawn around (0.75 * W, ~0.46 * H).
+const faceTexCache = new Map();
+function faceTexture(skinHex, hairHex) {
+  const key = skinHex + ':' + hairHex;
+  let tex = faceTexCache.get(key);
+  if (tex) return tex;
+  const W = 512, H = 256;
+  const c = document.createElement('canvas');
+  c.width = W; c.height = H;
+  const ctx = c.getContext('2d');
+  const base = hex3(skinHex);
+  const lcol = new THREE.Color(skinHex).multiplyScalar(1.16);
+  lcol.r = Math.min(1, lcol.r); lcol.g = Math.min(1, lcol.g); lcol.b = Math.min(1, lcol.b);
+  const light = hex3(lcol.getHex());
+  const dark = hex3(new THREE.Color(skinHex).multiplyScalar(0.72).getHex());
+  const hair = hex3(hairHex);
+  ctx.fillStyle = base; ctx.fillRect(0, 0, W, H);
+  // vertical shading: crown lighter, jaw darker
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, light); g.addColorStop(0.45, base); g.addColorStop(1, dark);
+  ctx.globalAlpha = 0.55; ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  ctx.globalAlpha = 1;
+
+  const cx = 0.75 * W, cy = 0.46 * H; // the -Z face centre
+  // cheek warmth
+  const cheek = ctx.createRadialGradient(cx, cy + 26, 4, cx, cy + 26, 60);
+  cheek.addColorStop(0, 'rgba(255,110,85,0.16)'); cheek.addColorStop(1, 'rgba(255,110,85,0)');
+  ctx.fillStyle = cheek; ctx.fillRect(cx - 90, cy - 20, 180, 110);
+  // eyes — big and high-contrast so they read at 3-8 m of play distance
+  for (const s of [-1, 1]) {
+    const ex = cx + 31 * s, ey = cy - 6;
+    ctx.fillStyle = 'rgba(25,18,14,0.45)';
+    ctx.beginPath(); ctx.ellipse(ex, ey - 12, 17, 6, 0, 0, Math.PI * 2); ctx.fill(); // socket shadow
+    ctx.fillStyle = '#f8f6f2';
+    ctx.beginPath(); ctx.ellipse(ex, ey, 14, 9.5, 0, 0, Math.PI * 2); ctx.fill();   // white
+    ctx.fillStyle = '#2a1c10';
+    ctx.beginPath(); ctx.arc(ex, ey + 0.5, 6, 0, Math.PI * 2); ctx.fill();          // iris
+    ctx.fillStyle = '#0a0605';
+    ctx.beginPath(); ctx.arc(ex, ey + 0.5, 3.4, 0, Math.PI * 2); ctx.fill();        // pupil
+    ctx.fillStyle = 'rgba(255,255,255,0.9)';
+    ctx.beginPath(); ctx.arc(ex - 2, ey - 2, 1.8, 0, Math.PI * 2); ctx.fill();      // glint
+    ctx.strokeStyle = 'rgba(25,16,11,0.9)'; ctx.lineWidth = 3.5;                    // upper lid
+    ctx.beginPath(); ctx.ellipse(ex, ey - 1.5, 14.5, 10, 0, Math.PI, Math.PI * 2); ctx.stroke();
+  }
+  // brows (dark, thick, slight angle)
+  ctx.strokeStyle = hair; ctx.lineWidth = 7; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(cx - 46, cy - 22); ctx.quadraticCurveTo(cx - 31, cy - 28, cx - 15, cy - 24); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx + 46, cy - 22); ctx.quadraticCurveTo(cx + 31, cy - 28, cx + 15, cy - 24); ctx.stroke();
+  // nose: soft shadow + highlight
+  ctx.fillStyle = 'rgba(55,30,22,0.3)';
+  ctx.beginPath(); ctx.ellipse(cx, cy + 17, 6, 4.5, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = 'rgba(255,240,225,0.3)';
+  ctx.beginPath(); ctx.ellipse(cx, cy + 10, 3.4, 5.5, 0, 0, Math.PI * 2); ctx.fill();
+  // mouth: neutral line + lower lip
+  ctx.strokeStyle = 'rgba(65,30,26,0.85)'; ctx.lineWidth = 3.5;
+  ctx.beginPath(); ctx.moveTo(cx - 11, cy + 32); ctx.quadraticCurveTo(cx, cy + 35, cx + 11, cy + 32); ctx.stroke();
+  ctx.fillStyle = 'rgba(255,215,200,0.35)';
+  ctx.beginPath(); ctx.ellipse(cx, cy + 39, 9, 3.4, 0, 0, Math.PI * 2); ctx.fill();
+  // sideburns hint near the seam edges is skipped (seam is mid-side, hair covers top)
+
+  tex = new THREE.CanvasTexture(c);
+  faceTexCache.set(key, tex);
+  return tex;
+}
 
 export function createAvatar({ id, name, team, isSelf = false, isBot = false }) {
   const group = new THREE.Group();
@@ -121,18 +193,16 @@ export function createAvatar({ id, name, team, isSelf = false, isBot = false }) 
   const teamColor = TEAM_COLORS[team] ?? 0x9aa5b8;
 
   // ---------------- materials (per-avatar; disposed in dispose()) -----------
-  const skinMat = mat(out.skin);
-  const skinShadeMat = mat(shade(out.skin, 0.72));
-  const hairMat = mat(out.hairColor);
+  const skinMat = mat(out.skin, { roughness: 0.6 });
+  const hairMat = mat(out.hairColor, { roughness: 0.95 });
   const shirtMat = mat(out.shirtColor);
   const shirtDarkMat = mat(shade(out.shirtColor, 0.66));
   const pantsMat = mat(out.pantsColor);
-  const pantsDarkMat = mat(shade(out.pantsColor, 0.7));
-  const bootMat = mat(out.shoeColor);
-  const soleMat = mat(out.shoeColor === 0xececec ? 0xb9bec7 : 0xf2f3f5);
-  const sockMat = mat(SOCK);
-  const darkMat = mat(DARK);
-  const whiteMat = mat(WHITE);
+  const bootMat = mat(out.shoeColor, { roughness: 0.55 });
+  const soleMat = mat(out.shoeColor === 0xececec ? 0xb9bec7 : 0xf2f3f5, { roughness: 0.4 });
+  const sockMat = mat(SOCK, { roughness: 0.9 });
+  const darkMat = mat(DARK, { roughness: 0.4, metalness: 0.3 });
+  const whiteMat = mat(WHITE, { roughness: 0.9 });
   const teamMat = mat(teamColor, { emissive: new THREE.Color(teamColor).multiplyScalar(0.25) });
   const glowMats = [shirtMat];
   const tintMats = [shirtMat, shirtDarkMat, pantsMat, bootMat, hairMat]; // found greys-out
@@ -181,7 +251,7 @@ export function createAvatar({ id, name, team, isSelf = false, isBot = false }) 
     m(chest, cylGeo(0.0055, 0.0055, 0.085), whiteMat, -0.035, -0.145, -0.118); // drawstring
     m(chest, cylGeo(0.0055, 0.0055, 0.085), whiteMat, 0.035, -0.145, -0.118);
   } else if (out.shirtStyle === 'jacket') {
-    m(chest, GEO.sphere, shirtDarkMat, 0, -0.07, -0.106, 0.016, 0.30, 0.014); // zipper
+    m(chest, GEO.sphere, shirtDarkMat, 0, -0.03, -0.104, 0.015, 0.21, 0.013); // zipper (short)
     m(chest, cylGeo(0.088, 0.094, 0.06), shirtDarkMat, 0, 0.415, 0, 1, 1, 0.85); // collar
   }
 
@@ -223,21 +293,15 @@ export function createAvatar({ id, name, team, isSelf = false, isBot = false }) 
   headRoot.position.y = 0.19; // world y ≈ 1.48
   chest.add(headRoot);
   m(headRoot, cylGeo(0.05, 0.055, 0.09), skinMat, 0, -0.02, 0);        // neck
-  const skull = m(headRoot, GEO.sphere, skinMat, 0, 0.13, 0, 0.15, 0.159, 0.145);
-  // ears
+  // head: painted face texture (eyes, brows, nose, mouth) mapped onto the
+  // sphere — reads far more "real" at play distance than little spheres
+  const faceMat = new THREE.MeshStandardMaterial({
+    map: faceTexture(out.skin, out.hairColor), roughness: 0.62, metalness: 0,
+  });
+  const skull = m(headRoot, GEO.sphere, faceMat, 0, 0.13, 0, 0.15, 0.159, 0.145);
+  // ears (3D, stick out slightly)
   m(headRoot, GEO.sphere, skinMat, -0.145, 0.11, 0, 0.019, 0.028, 0.026);
   m(headRoot, GEO.sphere, skinMat, 0.145, 0.11, 0, 0.019, 0.028, 0.026);
-  // eyes (white + pupil)
-  m(headRoot, GEO.sphere, whiteMat, -0.052, 0.145, -0.128, 0.024, 0.028, 0.017);
-  m(headRoot, GEO.sphere, whiteMat, 0.052, 0.145, -0.128, 0.024, 0.028, 0.017);
-  m(headRoot, GEO.sphere, darkMat, -0.052, 0.145, -0.144, 0.011, 0.013, 0.007);
-  m(headRoot, GEO.sphere, darkMat, 0.052, 0.145, -0.144, 0.011, 0.013, 0.007);
-  // brows
-  m(headRoot, GEO.sphere, hairMat, -0.052, 0.185, -0.13, 0.024, 0.007, 0.012);
-  m(headRoot, GEO.sphere, hairMat, 0.052, 0.185, -0.13, 0.024, 0.007, 0.012);
-  // nose + mouth
-  m(headRoot, GEO.sphere, skinMat, 0, 0.10, -0.142, 0.015, 0.019, 0.016);
-  m(headRoot, GEO.sphere, skinShadeMat, 0, 0.052, -0.132, 0.026, 0.008, 0.01);
 
   function hair() {
     switch (out.hairStyle) {
@@ -271,16 +335,18 @@ export function createAvatar({ id, name, team, isSelf = false, isBot = false }) 
       m(headRoot, GEO.sphere, hatMat, 0, 0.175, -0.155, 0.14, 0.016, 0.09); // brim
     } else {
       m(headRoot, GEO.hemi, hatMat, 0, 0.18, 0.006, 0.162, 0.12, 0.168);
-      const bb = m(headRoot, torusGeo(0.148, 0.03), mat(shade(out.hat.color, 0.7)), 0, 0.115, 0);
-      bb.rotation.x = Math.PI / 2; // folded band
+      // folded band at the hairline (NOT over the face — an earlier revision
+      // sat at mouth height and read as a ninja mask)
+      const bb = m(headRoot, torusGeo(0.152, 0.032), mat(shade(out.hat.color, 0.7)), 0, 0.165, 0);
+      bb.rotation.x = Math.PI / 2;
     }
     tintMats.push(hatMat);
   } else if (team === TEAMS.SEEKERS) {
     // seekers: orange goggle band + dark lenses
-    const gb = m(headRoot, torusGeo(0.138, 0.016), mat(0xff6a3d, { emissive: new THREE.Color(0x552200) }), 0, 0.145, 0);
+    const gb = m(headRoot, torusGeo(0.142, 0.016), mat(0xff6a3d, { emissive: new THREE.Color(0x552200) }), 0, 0.152, 0);
     gb.rotation.x = Math.PI / 2;
-    m(headRoot, GEO.sphere, darkMat, -0.055, 0.145, -0.125, 0.042, 0.038, 0.021);
-    m(headRoot, GEO.sphere, darkMat, 0.055, 0.145, -0.125, 0.042, 0.038, 0.021);
+    m(headRoot, GEO.sphere, darkMat, -0.055, 0.152, -0.128, 0.036, 0.033, 0.018);
+    m(headRoot, GEO.sphere, darkMat, 0.055, 0.152, -0.128, 0.036, 0.033, 0.018);
   } else if (out.glasses) {
     m(headRoot, GEO.sphere, darkMat, -0.055, 0.145, -0.132, 0.044, 0.042, 0.02);
     m(headRoot, GEO.sphere, darkMat, 0.055, 0.145, -0.132, 0.044, 0.042, 0.02);
@@ -314,6 +380,7 @@ export function createAvatar({ id, name, team, isSelf = false, isBot = false }) 
   const state = {
     id, name, team, isSelf, isBot,
     found: false, revealed: false, talking: false,
+    effect: null, // 'boost' | 'cloak' | null (supply crate effects)
     phase: 0, // gait phase (radians; 2π = one full stride pair)
   };
 
@@ -439,7 +506,8 @@ export function createAvatar({ id, name, team, isSelf = false, isBot = false }) 
     if (!grounded && jumpVy != null) sy += Math.max(-0.05, Math.min(0.07, jumpVy * 0.012));
     rig.scale.set(1, sy, 1);
 
-    // ---- glow: scan ping / revealed shimmer / found grey ----------------------
+    // ---- glow: scan ping / item effect / revealed shimmer / found grey -------
+    const EFFECTS = { boost: [1.0, 0.72, 0.15], cloak: [0.2, 0.85, 1.0] };
     const pinged = state.pingUntil && now < state.pingUntil;
     if (pinged) {
       const p = 0.5 + 0.5 * Math.sin(now * 0.02);
@@ -449,6 +517,15 @@ export function createAvatar({ id, name, team, isSelf = false, isBot = false }) 
       }
       ring.material.color.setHex(0x5b8cff);
       ring.material.opacity = 0.35 + 0.5 * p;
+    } else if (state.effect && EFFECTS[state.effect] && !state.found) {
+      const [er, eg, eb] = EFFECTS[state.effect];
+      const p = 0.45 + 0.4 * Math.sin(now * 0.008);
+      for (const m of glowMats) {
+        m.emissive = m.emissive || new THREE.Color();
+        m.emissive.setRGB(er * p, eg * p, eb * p);
+      }
+      ring.material.color.setRGB(er, eg, eb);
+      ring.material.opacity = 0.25 + 0.3 * p;
     } else if (state.revealed && !state.found) {
       const pulse = 0.5 + 0.5 * Math.sin(now * 0.008);
       for (const m of glowMats) {
@@ -474,6 +551,8 @@ export function createAvatar({ id, name, team, isSelf = false, isBot = false }) 
       drawPlate();
     },
     setRevealed(on) { state.revealed = !!on; },
+    /** Active supply-crate effect glow: 'boost' (gold) | 'cloak' (cyan) | null. */
+    setEffect(kind) { state.effect = kind || null; },
     setTalking(on) { if (state.talking !== on) { state.talking = !!on; drawPlate(); } },
 
     /** Scan-pulse contact marker: flare this avatar for a couple of seconds. */
