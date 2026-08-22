@@ -2,6 +2,17 @@
 // asserts all rooms / passages / spawns are reachable + hide spots generate.
 // Run: node tools/verify-map.mjs
 import { getMap, MAPS, computeHideSpots } from '../shared/map.js';
+import { supportHeight } from '../shared/geometry.js';
+
+/** True if a player standing at (x,z) on nominal floor `floorY` has ground
+ *  within `tol` under their feet (stair steps count). Uses the SAME support
+ *  function the in-game controller uses, so what we check is what the player
+ *  experiences. */
+function supported(map, x, z, floorY, tol = 0.8) {
+  const s = supportHeight(x, z, floorY, map.colliders, floorY - 1.2, 0.1);
+  return s > floorY - tol;
+}
+const inHole = (map, x, z) => (map.holes ?? []).some((h) => x > h.x1 && x < h.x2 && z > h.z1 && z < h.z2);
 
 // A collider blocks walking at height h if it overlaps the body band (h+0.36 .. h+1.7)
 function makeBlocked(map) {
@@ -120,12 +131,33 @@ for (const [id, build] of Object.entries(MAPS)) {
   const spots = computeHideSpots(m);
   check('hide spots generated', spots.length > 15, `(${spots.length} spots)`);
 
+  // every hide spot must have floor under it (no mid-air bots)
+  const floating = spots.filter(([x, y, z]) => !supported(m, x, z, y, 0.5));
+  check('no hide spot stands in mid-air', floating.length === 0,
+    floating.length ? `floating: ${floating.slice(0, 4).map((s) => s.map((v) => v.toFixed(1)).join(',')).join(' | ')}` : '');
+
   if (m.verify?.floors) {
     for (const [fname, fl] of Object.entries(m.verify.floors)) {
-      const filled = flood(blk, fl.start[0], fl.start[1], fl.h, m.bounds);
-      for (const [tname, [x, z]] of Object.entries(fl.targets)) {
+      const bounds = fl.bounds ?? m.bounds;
+      const filled = flood(blk, fl.start[0], fl.start[1], fl.h, bounds);
+      for (const [tname, [x, z]] of Object.entries(fl.targets ?? {})) {
         check(`${fname}: ${tname}`, reachable(filled, x, z));
       }
+      // every walkable cell on this floor must have floor under it
+      let unsupported = 0, first = null, sampled = 0;
+      let i = 0;
+      for (const cell of filled) {
+        i++;
+        if (i % 3 !== 0) continue; // sample every 3rd cell (fast, still dense)
+        const [cx, cz] = cell.split(',').map(Number);
+        const x = cx * CELL, z = cz * CELL;
+        if (fl.extent && (x < fl.extent.minX || x > fl.extent.maxX || z < fl.extent.minZ || z > fl.extent.maxZ)) continue;
+        if (inHole(m, x, z)) continue; // declared intentional hole
+        sampled++;
+        if (!supported(m, x, z, fl.h, 0.8)) { unsupported++; if (!first) first = [x, z]; }
+      }
+      check(`${fname}: every walkable cell has floor`, unsupported === 0,
+        unsupported ? `${unsupported} floating cell(s), e.g. (${first[0].toFixed(1)}, ${first[1].toFixed(1)}) [${sampled} sampled]` : `${sampled} cells sampled`);
     }
   }
 }

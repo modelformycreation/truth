@@ -19,7 +19,7 @@
 //                  water tank — with a parapet gap at the stair bridge.
 // ============================================================================
 
-import { boxFromCenterSize } from './geometry.js';
+import { boxFromCenterSize, supportHeight } from './geometry.js';
 import { DEFAULT_CONFIG } from './config.js';
 
 const WALL_H = 4.58;
@@ -172,7 +172,12 @@ function buildFacility() {
   wallZ(40, 25, 44, { doors: [{ at: 35.5, w: 5, doorH: ROLL_H }, { at: 28.5, w: 1, doorH: VENT_H }] });
 
   // ---- ground slabs (holes: basement stairwell + basement ladder) ----------
+  // BUG FIX (playtest 2026-08-22): the strip between the corridor wall (z=25)
+  // and the south-wing slabs (z=31) had NO floor — players fell through the
+  // north atrium and bots "hid" standing in mid-air. The stairwell (x 2..5)
+  // stays a hole; everything east of it gets floor.
   floorSlab(2, 62, 2, 25, 0, COL.floorIn);        // north wing + main corridor
+  floorSlab(5, 62, 25, 31, 0, COL.floorIn);       // north strip of storage/atrium/warehouse
   floorSlab(2, 5, 31, 44, 0, COL.floorIn);        // storage west sliver (beside stairwell)
   floorSlab(5, 36, 31, 44, 0, COL.floorIn);       // south wing, west of ladder hole
   floorSlab(38, 62, 31, 44, 0, COL.floorIn);      // south wing, east of ladder hole
@@ -446,8 +451,31 @@ function buildFacility() {
     bounds: { minX: 0, maxX: 66, minZ: 0, maxZ: 48 },
     boxes: [...boxes],
     ladders: [...ladders],
+    // scene identity: cold, clinical research facility at night
+    scene: {
+      bg: 0x0d1018, fog: [0x0d1018, 18, 78],
+      hemi: [0x9db4d8, 0x2c313c, 0.9],
+      key: [0xffe9c4, 0.75, [40, 60, -30]],
+      fill: [0x6a86c8, 0.28, [-30, 40, 35]],
+    },
     spawns: { gathering, seekers },
     labels,
+    // Intentional holes in the ground floor (verify:map exempts these;
+    // computeHideSpots never places a bot on one).
+    holes: [
+      { x1: 2, x2: 5, z1: 25, z2: 31.2, note: 'basement stairwell' },
+      { x1: 36, x2: 38, z1: 39, z2: 41, note: 'secret ladder hole to B1' },
+      { x1: 58, x2: 60, z1: 4, z2: 6, note: 'roof hatch (ladder from office B)' },
+    ],
+    verify: { floors: {
+      ground: { start: [31.5, 33.5], h: 0, bounds: null },
+      basement: { start: [3.5, 32.5], h: -3.2, bounds: { minX: 2, maxX: 40, minZ: 31, maxZ: 41 },
+                  extent: { minX: 2, maxX: 40, minZ: 31, maxZ: 41 } },
+      // extent = the actual roof slab (the flood also reaches the exterior
+      // alley via the parapet gap, which has no roof by design)
+      roof: { start: [31.5, 10], h: 5.0, bounds: null,
+              extent: { minX: 2, maxX: 62.4, minZ: 1.6, maxZ: 44.4 } },
+    } },
     floorHeightAt: null, // computed via colliders
   });
 }
@@ -484,6 +512,7 @@ function finalizeMap(id, name, raw) {
     id,
     name,
     ...raw,
+    holes: raw.holes ?? [], // intentional floor holes (stairwells / secret holes)
     colliders,
     losBlockers,
     hideSpots: null, // computed lazily server-side (computeHideSpots)
@@ -517,6 +546,11 @@ export function computeHideSpots(map, minSeekerDistance = DEFAULT_CONFIG.hideSpo
       if (z < map.bounds.minZ + 0.4 || z > map.bounds.maxZ - 0.4) continue;
       // never hand out a spot the seekers spawn on top of
       if (tooCloseToSeekers(x, z)) continue;
+      // never hand out a spot over a floor hole (bots would stand in mid-air)
+      if ((map.holes ?? []).some((h) => x > h.x1 && x < h.x2 && z > h.z1 && z < h.z2)) continue;
+      // never hand out a spot with no floor under it (e.g. just past a floor
+      // edge next to a wall) — same support test the player physics uses
+      if (supportHeight(x, z, y, map.colliders, y - 1.2, 0.1) <= y - 0.5) continue;
       // reject if the point is inside any collider above the floor
       let inside = false;
       for (const c of map.colliders) {
@@ -544,10 +578,11 @@ function buildDocks() {
   ladders.length = 0;
 
   const D = {
-    fence: 0x4a5560, ground: 0x484d55, wall: 0x6b7280, wallDark: 0x535a66,
-    contA: 0x2e6f6a, contB: 0x8a4a3a, crate: 0xa08652, rack: 0x30363f,
-    machine: 0x4a5560, barrel: 0x7a5c3a, pillar: 0x7a8290, shed: 0x535a66,
-    light: 0xfff2cc, signExit: 0x6ef2a6, signRoom: 0x8fbaff, signWarn: 0xffc46b,
+    fence: 0x5a6474, ground: 0x575147, wall: 0x77726a, wallDark: 0x55524b,
+    contA: 0x2e7a6f, contB: 0x9a4a30, contC: 0x3a5a8a, contD: 0xb08a2e,
+    crate: 0xa08652, rack: 0x30363f, machine: 0x4a5560, barrel: 0x7a5c3a,
+    pillar: 0x7a8290, shed: 0x535a66, crane: 0xd8a832,
+    light: 0xffc27a, signExit: 0x6ef2a6, signRoom: 0x8fbaff, signWarn: 0xffc46b,
   };
   const H = 4.0; // warehouse wall height
 
@@ -577,8 +612,11 @@ function buildDocks() {
   prop(14.6, 22.6, 1.1, 1.1, 1.1, D.barrel);
 
   // ---- north container yard (z 2..11): tall containers + alleys ------------
+  // four container colours cycle down the yard (teal / rust / navy / yellow)
+  const contCols = [D.contA, D.contB, D.contC, D.contD];
+  let ci = 0;
   const cont = (cx, cz, w, tall) =>
-    prop(cx, cz, w, 2.3, tall ? 2.6 : 1.2, tall ? D.contA : D.contB);
+    prop(cx, cz, w, 2.3, tall ? 2.6 : 1.2, contCols[ci++ % 4]);
   // row A (z=4)
   cont(8, 4, 5.5, true); cont(15, 4, 5.5, true); cont(22, 4, 5.5, false);
   cont(29, 4, 5.5, true); cont(36, 4, 5.5, true); cont(43, 4, 5.5, false);
@@ -587,7 +625,13 @@ function buildDocks() {
   cont(32.5, 8.5, 5.5, true); cont(39.5, 8.5, 5.5, false); cont(46.5, 8.5, 5.5, true);
   // a couple of extra stacked (taller) for LOS variety
   prop(6, 6.5, 3, 2.3, 3.4, D.contB);
-  prop(48, 6.5, 3, 2.3, 3.4, D.contB);
+  prop(48, 6.5, 3, 2.3, 3.4, D.contC);
+  // yellow gantry crane over the yard — a tall landmark + LOS break
+  const craneY = 7.5;
+  prop(20, 3, 0.6, 0.6, 6.5, D.crane);
+  prop(20, 10, 0.6, 0.6, 6.5, D.crane);
+  prop(20, craneY, 1.5, 0.8, 8.5, D.crane); // boom
+  prop(16.5, craneY - 0.6, 0.5, 0.5, 1.4, D.crane); // trolley
 
   // ---- south pier (z 27..38): sheds, crates, barrels ------------------------
   // shed 1 (doorway faces south)
@@ -636,6 +680,14 @@ function buildDocks() {
     bounds: { minX: 0, maxX: 52, minZ: 0, maxZ: 40 },
     boxes: [...boxes],
     ladders: [...ladders],
+    // scene identity: night port under warm sodium lamps (key from the south
+    // pier, fill from the north yard, so building faces light from both sides)
+    scene: {
+      bg: 0x0c1428, fog: [0x0c1428, 20, 70],
+      hemi: [0x7a8ab0, 0x33261a, 1.2],
+      key: [0xffb45e, 0.85, [35, 55, 20]],
+      fill: [0x4a6a9a, 0.5, [-25, 45, -25]],
+    },
     spawns: { gathering, seekers },
     labels,
     floorHeightAt: null,
@@ -666,10 +718,11 @@ function buildMall() {
   ladders.length = 0;
 
   const M = {
-    fence: 0x4a5058, ground: 0x5b5e66, wall: 0x8b8f99, wallDark: 0x666b74,
-    shop: 0x6f6a75, arcade: 0x2f4f6a, table: 0x9c7e5a, planter: 0x3f7d4c,
-    fountain: 0x4a6a8a, crate: 0xa08652, rack: 0x30363f, pillar: 0x7a8290,
-    light: 0xfff2cc, signExit: 0x6ef2a6, signRoom: 0x8fbaff, signWarn: 0xffc46b,
+    fence: 0x4a4058, ground: 0x4a4458, wall: 0x5a4a6e, wallDark: 0x453a56,
+    shop: 0x6a4a7a, arcade: 0x2f4f6a, table: 0x9c7e5a, planter: 0x4a6a8a,
+    fountain: 0x5a4a8a, crate: 0xa08652, rack: 0x3a3050, pillar: 0x6a5a7a,
+    neonPink: 0xff4fa0, neonCyan: 0x2ee8e8, neonGold: 0xffc46b, neonPurple: 0x8a5aff,
+    light: 0xff6ad5, signExit: 0x6ef2a6, signRoom: 0xff6ad5, signWarn: 0x2ee8e8,
   };
   const H = 4.2; // shop wall height
 
@@ -698,6 +751,13 @@ function buildMall() {
   prop(39, 14, 1, 4, 2.2, M.rack);
   prop(39, 22, 1, 4, 2.2, M.rack);
 
+  // neon shopfront strips above each shop door (cosmetic, emissive) — this is
+  // what makes the mall read as a mall, not a grey box
+  const neonShop = [M.neonPink, M.neonCyan, M.neonGold, M.neonPurple];
+  let si = 0;
+  for (const dx of [14, 22, 30]) { sign(dx, 3.3, 8.3, 2.6, neonShop[si++ % 4], 'x'); sign(dx, 3.3, 27.7, 2.6, neonShop[si++ % 4], 'x'); }
+  for (const dz of [14, 22]) { sign(8.3, 3.3, dz, 2.4, neonShop[si++ % 4], 'z'); sign(35.7, 3.3, dz, 2.4, neonShop[si++ % 4], 'z'); }
+
   // central atrium: fountain (tall, LOS) + planters + food court tables
   prop(22, 11, 2.6, 2.6, 1.8, M.fountain);
   prop(15, 12, 0.8, 0.8, 1.6, M.planter);
@@ -708,9 +768,12 @@ function buildMall() {
   for (const [tx, tz] of [[12, 18], [16, 18], [12, 21], [16, 21], [28, 18], [32, 18], [28, 21], [32, 21]]) {
     prop(tx, tz, 1.2, 1.2, 0.75, M.table);
   }
-  // arcade cabinets near the south wall (tall, neon, LOS)
-  for (const ax of [11, 13.5, 16, 18.5]) prop(ax, 26.5, 1.1, 1.1, 2.2, M.arcade);
-  for (const ax of [25.5, 28, 30.5, 33]) prop(ax, 26.5, 1.1, 1.1, 2.2, M.arcade);
+  // arcade cabinets near the south wall (tall, neon, LOS) — each cabinet a
+  // different neon colour, like a real arcade wall
+  const neonCols = [M.neonPink, M.neonCyan, M.neonGold, M.neonPurple];
+  let ni = 0;
+  for (const ax of [11, 13.5, 16, 18.5]) prop(ax, 26.5, 1.1, 1.1, 2.2, neonCols[ni++ % 4]);
+  for (const ax of [25.5, 28, 30.5, 33]) prop(ax, 26.5, 1.1, 1.1, 2.2, neonCols[ni++ % 4]);
   // scattered crates
   prop(9, 25, 1.3, 1.3, 1.2, M.crate);
   prop(35, 25, 1.3, 1.3, 1.2, M.crate);
@@ -756,6 +819,14 @@ function buildMall() {
     bounds: { minX: 0, maxX: 44, minZ: 0, maxZ: 36 },
     boxes: [...boxes],
     ladders: [...ladders],
+    // scene identity: night arcade bathed in neon (magenta key + cyan fill,
+    // strong ambient so interior walls read on every facing)
+    scene: {
+      bg: 0x1c1030, fog: [0x1c1030, 20, 66],
+      hemi: [0x9a7ac0, 0x241436, 1.1],
+      key: [0xff4fa0, 0.7, [25, 50, -8]],
+      fill: [0x2ee8e8, 0.7, [-20, 45, 32]],
+    },
     spawns: { gathering, seekers },
     labels,
     floorHeightAt: null,
