@@ -40,8 +40,6 @@ function disposeMapGeometry(scene, g) {
 
 export function buildWorld(canvas, quality = 'medium', mapId = 'facility') {
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x0d1018);
-  scene.fog = new THREE.Fog(0x0d1018, 18, 78);
 
   const pixelRatio = quality === 'low' ? 1 : quality === 'high' ? Math.min(devicePixelRatio, 2) : Math.min(devicePixelRatio, 1.5);
   // Antialias is always on: aliased silhouette edges are the main thing that
@@ -53,19 +51,32 @@ export function buildWorld(canvas, quality = 'medium', mapId = 'facility') {
   const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.1, 220);
   camera.position.set(31, 3, 40);
 
-  // ---------------- lights (map-independent, persistent) ----------------
-  const hemi = new THREE.HemisphereLight(0x9db4d8, 0x2c313c, 0.9);
+  // ---------------- lights (recoloured per map) ----------------
+  const hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 1);
   scene.add(hemi);
-  const sun = new THREE.DirectionalLight(0xffe9c4, 0.75);
-  sun.position.set(40, 60, -30);
+  const sun = new THREE.DirectionalLight(0xffffff, 0.7);
   scene.add(sun);
-  const fill = new THREE.DirectionalLight(0x6a86c8, 0.28);
-  fill.position.set(-30, 40, 35);
+  const fill = new THREE.DirectionalLight(0xffffff, 0.3);
   scene.add(fill);
+
+  /** Apply a map's scene identity: sky, fog, and lighting. */
+  function applyScene(m) {
+    const sc = m.scene ?? {};
+    scene.background = new THREE.Color(sc.bg ?? 0x0d1018);
+    const f = sc.fog ?? [0x0d1018, 18, 78];
+    scene.fog = new THREE.Fog(f[0], f[1], f[2]);
+    const h = sc.hemi ?? [0x9db4d8, 0x2c313c, 0.9];
+    hemi.color.setHex(h[0]); hemi.groundColor.setHex(h[1]); hemi.intensity = h[2];
+    const k = sc.key ?? [0xffe9c4, 0.75, [40, 60, -30]];
+    sun.color.setHex(k[0]); sun.intensity = k[1]; sun.position.set(k[2][0], k[2][1], k[2][2]);
+    const fl = sc.fill ?? [0x6a86c8, 0.28, [-30, 40, 35]];
+    fill.color.setHex(fl[0]); fill.intensity = fl[1]; fill.position.set(fl[2][0], fl[2][1], fl[2][2]);
+  }
 
   // ---------------- current map ----------------
   let map = getMap(mapId);
   let geo = buildMapGeometry(scene, map);
+  applyScene(map);
 
   const world = {
     scene, camera, renderer,
@@ -81,6 +92,7 @@ export function buildWorld(canvas, quality = 'medium', mapId = 'facility') {
       disposeMapGeometry(scene, geo);
       map = next;
       geo = buildMapGeometry(scene, map);
+      applyScene(map);
     },
     resize() {
       camera.aspect = innerWidth / innerHeight;
