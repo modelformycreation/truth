@@ -204,7 +204,7 @@ hide-and-seek/
 │   ├── voice.js          #   team channel assignment + signaling relay
 │   ├── turn.js           #   TURN (cross-network voice) credential generation
 │   ├── controls.js       #   per-player custom-control persistence (code/device)
-│   └── chat.js           #   text chat (see game-room.sendChat)
+│   └── sendChat in game-room.js  # text chat: lobby all / in-round team-only
 ├── client/               # mobile-first web client (Three.js, no build step)
 │   ├── index.html        #   screens: home / lobby / HUD / results / settings
 │   ├── css/style.css     #   mobile-first UI

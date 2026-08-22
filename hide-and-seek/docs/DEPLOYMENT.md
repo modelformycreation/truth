@@ -86,16 +86,28 @@ fail on some networks.
 
 WebRTC peer-to-peer voice works for most home networks using free public
 STUN. Roughly 10–20 % of NAT pairings (carrier-grade NAT, strict corporate
-firewalls) additionally need a **TURN relay**, which costs bandwidth. Set:
+firewalls) additionally need a **TURN relay**, which costs bandwidth.
+
+The server serves the STUN + TURN ICE servers at `GET /api/config`. STUN is
+configured via `STUN_URLS` (default: two public Google STUN servers). TURN is
+optional and configured via env vars; when `TURN_SECRET` is set the server
+issues short-lived Coturn credentials (username = expiry, credential =
+HMAC-SHA1) to every client:
 
 ```bash
-STUN_URLS=stun:stun.l.google.com:19302
-# later, if you run coturn:
-# STUN_URLS=stun:stun.example.com,turn:turn.example.com?transport=udp
+TURN_SECRET=CHANGE_ME_STRONG_SECRET \
+TURN_PUBLIC_IP=<public IP where coturn listens> \
+TURN_REALM=blackwood \
+TURN_PORT=3478 \
+TURN_TTL_SEC=3600 \
+npm start
 ```
 
-Running your own [coturn](https://github.com/coturn/coturn) on a $5 VPS is
-the standard cheap path — see LIMITATIONS-AND-COST.md.
+`TURN_PUBLIC_IP` is auto-detected when omitted. No `TURN_SECRET` = STUN-only
+(fine for same-network play). Running your own
+[coturn](https://github.com/coturn/coturn) on a $5 VPS is the standard cheap
+path — see the README's "Setting up cross-network voice (TURN)" guide and
+LIMITATIONS-AND-COST.md.
 
 ## Operations
 

@@ -5,7 +5,7 @@
 //   * requests the mic once (user gesture) and remembers the permission state
 //   * follows the server's channel assignment (voice:channel / voice:members)
 //   * relays signaling through the server (which enforces team isolation)
-//   * exposes push-to-talk / open-mic / mute and speaking indicators
+//   * exposes a tap-to-toggle mic on/off (Feature 2), mute, and indicators
 //
 // Swapping providers: implement the same surface as WebRtcMeshProvider
 // (acquireMic, joinChannel, leave, handleSignal, setTransmitting, setMuted,

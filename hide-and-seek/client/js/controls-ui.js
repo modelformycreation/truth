@@ -37,6 +37,12 @@ export class ControlsUI {
   _wire() {
     $('btn-controls-close').addEventListener('click', () => { this.close(); });
     $('btn-controls-save').addEventListener('click', () => { this.save(); this.close(); });
+    // The window drag listeners are bound ONCE (not per render — render() runs
+    // on every open/reset, and re-binding on each would leak listeners). The
+    // single move/up/cancel handlers operate on whichever button is pending.
+    window.addEventListener('pointermove', (e) => this._dragMove(e), { passive: true });
+    window.addEventListener('pointerup', () => { this._pending = null; }, { passive: true });
+    window.addEventListener('pointercancel', () => { this._pending = null; }, { passive: true });
   }
 
   open() {
@@ -109,28 +115,29 @@ export class ControlsUI {
   }
 
   _bindDrag(el, key, area, areaRect) {
+    this._areaRect = areaRect;
     el.addEventListener('pointerdown', (e) => {
       e.preventDefault();
       el.setPointerCapture?.(e.pointerId);
       this._pending = { key, el };
     });
-    const move = (e) => {
-      if (this._pending?.key !== key) return;
-      const r = areaRect();
-      if (r.width === 0 || r.height === 0) return;
-      let x = (e.clientX - r.left) / r.width;
-      let y = (e.clientY - r.top) / r.height;
-      x = Math.min(1, Math.max(0, x));
-      y = Math.min(1, Math.max(0, y));
-      el.style.left = `${x * 100}%`;
-      el.style.top = `${y * 100}%`;
-      const c = this.getControls();
-      const buttons = { ...c.buttons, [key]: { x: Math.round(x * 1000) / 1000, y: Math.round(y * 1000) / 1000 } };
-      this.onApply?.({ ...c, buttons });
-    };
-    window.addEventListener('pointermove', move, { passive: true });
-    window.addEventListener('pointerup', () => { this._pending = null; }, { passive: true });
-    window.addEventListener('pointercancel', () => { this._pending = null; }, { passive: true });
+  }
+
+  /** Single window pointermove handler (bound once in _wire). */
+  _dragMove(e) {
+    const p = this._pending;
+    if (!p?.el) return;
+    const r = (this._areaRect?.() ?? { width: 0, height: 0 });
+    if (r.width === 0 || r.height === 0) return;
+    let x = (e.clientX - r.left) / r.width;
+    let y = (e.clientY - r.top) / r.height;
+    x = Math.min(1, Math.max(0, x));
+    y = Math.min(1, Math.max(0, y));
+    p.el.style.left = `${x * 100}%`;
+    p.el.style.top = `${y * 100}%`;
+    const c = this.getControls();
+    const buttons = { ...c.buttons, [p.key]: { x: Math.round(x * 1000) / 1000, y: Math.round(y * 1000) / 1000 } };
+    this.onApply?.({ ...c, buttons });
   }
 
   /** Called when SAVE is pressed. */

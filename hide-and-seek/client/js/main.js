@@ -32,7 +32,7 @@ const WORLD_PHASES = new Set([PHASES.TEAM_ASSIGNMENT, PHASES.PREPARATION, PHASES
 // Build tag: shown on the home screen so players (and testers) can tell which
 // code they are actually running — an open tab keeps running the old build
 // until it is reloaded, and this is the fastest way to notice that.
-const BUILD = 'ff-2026-08-22b';
+const BUILD = 'ff-2026-08-22c';
 console.log(`[BLACKWOOD] client build ${BUILD}`);
 $('build-tag').textContent = BUILD;
 

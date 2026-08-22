@@ -65,7 +65,8 @@ export class WebRtcMeshProvider {
         },
         video: false,
       });
-      // start disabled for push-to-talk
+      // start silent; VoiceManager.enableMic() immediately applies the current
+      // tap-to-toggle state (transmitting = !muted) so the mic is live by default
       this.setTransmitting(false);
       this._setupLocalAnalyser();
       // the mic gesture is also our chance to unblock inbound audio playback
@@ -144,9 +145,9 @@ export class WebRtcMeshProvider {
   get transmitting() { return !!this._transmitting && !this._muted && this.hasMic(); }
 
   /**
-   * Push-to-talk gate on the outgoing track.
-   * A muted mic ALWAYS wins: previously setTransmitting(true) re-enabled the
-   * track even while muted, so pressing PTT while muted leaked your audio.
+   * Tap-to-toggle mic gate on the outgoing track (Feature 2 — no push-to-talk).
+   * A muted mic ALWAYS wins: setTransmitting(true) must not re-enable the
+   * track while muted, or a muted mic would leak audio.
    */
   setTransmitting(on) {
     this._transmitting = !!on;
