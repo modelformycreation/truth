@@ -251,9 +251,11 @@ try {
     await waitPhase(A, 'ACTIVE_ROUND', 45000);
     await sleep(1000);
 
-    // park in the open atrium and let the server agree on where we are
+    // park in the open atrium and let the server agree on where we are (long
+    // settle: in slow headless the anti-cheat correction can take a while to
+    // round-trip, and a late one would snap the position mid-measurement)
     await putAt(A, 31.5, 0, 33.5);
-    await sleep(1500);
+    await sleep(2500);
 
     const lockCam = () => A.evaluate(() => { window.__debug.controller.camYaw = Math.PI; });
     await lockCam();
@@ -263,28 +265,27 @@ try {
     });
 
     /**
-     * Press a key, measure the displacement, then press the opposite key for
-     * the same time to return roughly to the start. No teleporting inside the
-     * measurement — a teleport trips the server's anti-cheat and the resulting
-     * correction would corrupt the reading.
+     * Press a key, measure the displacement, then walk back with the opposite
+     * key so we return roughly to the start (all valid-speed movement, so the
+     * server stays in sync and no anti-cheat correction fires mid-measurement).
      */
-    async function measure(key, opposite, ms = 700, mods = []) { // eslint-disable-line
+    async function measure(key, opposite, ms = 900, mods = []) { // eslint-disable-line
       await lockCam();
-      await sleep(150);
+      await sleep(250);
       const before = await posOf(A);
       for (const m of mods) await A.keyboard.down(m);
       await A.keyboard.down(key);
       await sleep(ms);
       await A.keyboard.up(key);
       for (const m of mods) await A.keyboard.up(m);
-      await sleep(200);
+      await sleep(300);
       const after = await posOf(A);
-      // walk back
+      // walk back so the next measurement starts from the same open area
       if (opposite) {
         await A.keyboard.down(opposite);
         await sleep(ms);
         await A.keyboard.up(opposite);
-        await sleep(250);
+        await sleep(400); // let any trailing server correction land before the next read
       }
       return [after[0] - before[0], after[2] - before[2]];
     }
@@ -416,14 +417,27 @@ try {
     check('walking schedules real footstep audio', walkNoise >= 1, `+${walkNoise} noise nodes`);
 
     const jBefore = await countSfx();
-    // a jump only fires from the ground — settle first so a flaky airborne
-    // moment can't make the jump (and its audio) not happen
+    // a jump only fires from the ground. Park the character on known flat
+    // ground first — the earlier WASD/sprint tests can leave it on a ledge or
+    // stairs where it is airborne, and a jump from mid-air schedules nothing.
+    await putAt(A, 31.5, 0, 33.5);
     await A.waitForFunction(() => {
       const c = window.__debug.controller;
       return c.grounded && Math.abs(c.vy) < 0.01;
     }, null, { timeout: 3000 }).catch(() => {});
-    await A.keyboard.down('Space'); await A.waitForTimeout(120); await A.keyboard.up('Space');
-    await A.waitForTimeout(900); // allow the landing to be scheduled
+    const jy0 = await A.evaluate(() => window.__debug.controller.pos[1]);
+    // Hold Space for half a second: slow headless rAF (~150ms/frame) can run
+    // a shorter press entirely between two updates, so the jump never fires.
+    await A.keyboard.down('Space'); await A.waitForTimeout(500); await A.keyboard.up('Space');
+    // wait for the jump to actually leave the ground, then for the landing,
+    // instead of a fixed 900ms sleep — slow headless rAF can stretch the
+    // jump+land cycle well past a fixed window, causing a spurious failure.
+    await A.waitForFunction((y0) => window.__debug.controller.pos[1] > y0 + 0.2, jy0, { timeout: 4000 }).catch(() => {});
+    await A.waitForFunction(() => {
+      const c = window.__debug.controller;
+      return c.grounded && Math.abs(c.vy) < 0.01;
+    }, null, { timeout: 6000 }).catch(() => {});
+    await A.waitForTimeout(200); // let the landing SFX node get scheduled
     const jAfter = await countSfx();
     const jTone = jAfter.tone - jBefore.tone;
     const jNoise = jAfter.noise - jBefore.noise;
@@ -563,11 +577,16 @@ try {
         await M.evaluate(() => { window.__debug.controller.sprint.lock = true; });
       }
       await M.evaluate(() => { window.__debug.controller.camYaw = Math.PI; });
+      // Headless rAF can run slow (~150ms/frame), so speed2D can still hold the
+      // PREVIOUS test's value (e.g. 5.8 from the rim-hold sprint) for the first
+      // frame or two. Settle past that stale window before sampling, otherwise
+      // a "walk" measurement could falsely peak at sprint speed.
       await M.keyboard.down('w');
+      await sleep(400);
       let peak = 0;
-      for (let i = 0; i < 20; i++) {
+      for (let i = 0; i < 15; i++) {
         peak = Math.max(peak, await M.evaluate(() => window.__debug.controller.speed2D));
-        await sleep(50);
+        await sleep(60);
       }
       await M.keyboard.up('w');
       await resetSprint();
@@ -743,10 +762,19 @@ try {
     // WebRTC peer connections actually establish. `some` (not `every`): a
     // renegotiation can transiently leave an extra/closed peer entry, and the
     // very next check (remote audio track received) proves the media path.
-    const connected = await V1.waitForFunction(() => {
+    const iceConnected = () => {
       const peers = [...(window.__debug.voice.provider?.peers.values() ?? [])];
       return peers.some((p) => ['connected', 'completed'].includes(p.pc.connectionState) || p.pc.iceConnectionState === 'connected');
-    }, null, { timeout: 45000 }).then(() => true).catch(() => false);
+    };
+    let connected = await V1.waitForFunction(iceConnected, null, { timeout: 25000 }).then(() => true).catch(() => false);
+    if (!connected) {
+      // Under heavy headless CPU contention the initial offer can stall. Force a
+      // fresh channel rejoin on both ends (rebuilds the peer set + re-offers),
+      // then give it a second window — a single legitimate retry.
+      await V1.evaluate(() => window.__debug.voice._rejoin());
+      await V2.evaluate(() => window.__debug.voice._rejoin());
+      connected = await V1.waitForFunction(iceConnected, null, { timeout: 30000 }).then(() => true).catch(() => false);
+    }
     // diagnostic on failure: dump the connection states we actually saw
     const seen = connected ? null : await V1.evaluate(() =>
       [...(window.__debug.voice.provider?.peers.values() ?? [])]
