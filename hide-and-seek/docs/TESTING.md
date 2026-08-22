@@ -3,7 +3,7 @@
 ## Unit + acceptance tests (no browser needed)
 
 ```bash
-npm test                 # everything (81 tests)
+npm test                 # everything (214 tests)
 npm run test:unit        # fast logic tests
 npm run test:integration # socket-level acceptance scenario
 npm run verify:map       # map connectivity & hide-spot generation
@@ -19,9 +19,15 @@ Coverage highlights (`test/unit/`):
 | `rooms.test.js` | unique 6-char codes; valid/invalid/case-insensitive joins; full rooms; duplicate names; idle cleanup; host migration |
 | `teams.test.js` | 8 players → 3 seekers/5 hiders (default ratio); always ≥1 per side; preferences honored/ignored; bots always hide |
 | `voice.test.js` | per-team membership; cross-team signaling rejected; same-team relay; talk/mute scoped to channel; bots never in voice |
+| `voice-toggle.test.js` | Feature 2: mic is a tap-to-toggle; no push-to-talk/hold; muting never leaks |
 | `state.test.js` | full phase flow LOBBY→…→LOBBY; all-found → SEEKERS WIN; timer expiry → HIDERS WIN; hider disconnect forfeits after grace; reconnect restores team+HIDDEN; all-seekers-left; start gating; bot flow |
 | `geometry.test.js` | segment-AABB correctness, doorway vs wall LOS, tall vs low props, floor isolation |
 | `config.test.js` / `map.test.js` | spec defaults, clamped host settings, junk rejected; map integrity + hide spots across all 3 levels |
+| `minimap-arrow.test.js` | Feature 4: the minimap self-arrow points where the player faces, not 180° backwards; map stays north-up |
+| `sprint.test.js` | Feature 3: Free Fire locked-sprint state machine (rim-hold arms, next touch cancels, never self-cancels) |
+| `turn.test.js` | Feature 1: Coturn static-auth-secret TURN credentials (username=expiry, HMAC cred), STUN-only fallback |
+| `chat.test.js` / `chat-client.test.js` | Feature 5: lobby free chat, in-round team-split, length cap; client channel filtering (no cross-team leak) |
+| `controls.test.js` | Feature 6: control sanitization + persistence keyed by game code / device id |
 
 ## Acceptance test (`test/integration/acceptance.test.js`)
 

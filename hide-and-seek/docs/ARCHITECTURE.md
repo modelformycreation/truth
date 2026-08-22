@@ -11,7 +11,10 @@
  │    ├─ remote.js       interpolated remote players                         │
  │    ├─ world/avatar    rendering (merged geometry, 2 draw calls static)    │
  │    ├─ audio.js        synthesized SFX (no asset downloads)                │
+ │    ├─ chat.js         text chat UI (lobby all / in-round team-only)       │
+ │    ├─ controls-ui.js  custom controls (drag buttons, joystick size/side)  │
  │    └─ voice/          WebRTC mesh ⇄ teammates (audio NEVER via server)    │
+ │                      (STUN + TURN from /api/config for cross-network)     │
  └─────────────┬─────────────────────────────────────────────┬───────────────┘
         inputs │ game:move, game:catch, lobby:*               │ voice signaling
                ▼ (server-validated)                           ▼ (same-team only)
@@ -22,6 +25,9 @@
  │    ├─ catch.js       distance (server-measured) + LOS raycast vs map      │
  │    ├─ visibility.js  per-viewer FILTERED snapshots (anti-wallhack)        │
  │    ├─ voice.js       team channels, signaling relay, talk/mute events     │
+ │    ├─ turn.js        TURN credential generation (cross-network voice)     │
+ │    ├─ controls.js    per-player control persistence (game code / device)  │
+ │    └─ chat: sendChat team-split text chat (lobby all / round team-only)   │
  │    └─ timers/wins/reconnect/host-migration/bots                           │
  │  shared/*  ← the exact same map + config + geometry code the client uses  │
  └────────────────────────────────────────────────────────────────────────────┘

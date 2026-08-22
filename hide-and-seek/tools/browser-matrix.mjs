@@ -522,7 +522,7 @@ try {
     // stick returns to centre on release (no stuck input)
     const idle = await M.evaluate(() => {
       const c = window.__debug.controller;
-      return { x: c.input.x, z: c.input.z, stickSprint: c.stickSprint };
+      return { x: c.input.x, z: c.input.z, stickSprint: c.sprint.stickSprint };
     });
     check('joystick releases cleanly (no stuck movement)',
       Math.abs(idle.x) < 0.01 && Math.abs(idle.z) < 0.01 && !idle.stickSprint, JSON.stringify(idle));
@@ -550,45 +550,72 @@ try {
     check('joystick pushed to the rim sprints', rim > partial * 1.15,
       `partial ${partial.toFixed(2)} m/s vs rim ${rim.toFixed(2)} m/s`);
 
-    // --- SPRINT BUTTON ---
-    // Measured via the controller's OWN speed2D (not displacement): a
-    // displacement reading is noisy because the server correction for the
-    // putAt teleport can land mid-measurement.
-    await putAt(M, 31.5, 0, 33.5); await sleep(150);
-    const pressSprint = () => M.evaluate(() => {
-      const el = document.getElementById('btn-sprint');
-      const r = el.getBoundingClientRect();
-      const t = new Touch({ identifier: 9, target: el, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 });
-      el.dispatchEvent(new TouchEvent('touchstart', { bubbles: true, cancelable: true, touches: [t], targetTouches: [t], changedTouches: [t] }));
-    });
-    const releaseSprint = () => M.evaluate(() => {
-      const el = document.getElementById('btn-sprint');
-      const t = new Touch({ identifier: 9, target: el, clientX: 0, clientY: 0 });
-      el.dispatchEvent(new TouchEvent('touchend', { bubbles: true, cancelable: true, touches: [], targetTouches: [], changedTouches: [t] }));
-    });
-    const basePeak = await stickPeakSpeed(-20, 900);      // mid-tilt stick, no sprint
-    await pressSprint();
-    const sprintFlag = await M.evaluate(() => window.__debug.controller.sprintHeld);
-    check('sprint button registers a touch press', sprintFlag === true);
-    const sprintPeak = await stickPeakSpeed(-20, 900);    // mid-tilt stick + sprint held
-    await releaseSprint();
-    check('holding the SPRINT button makes a mid-tilt stick sprint',
-      sprintPeak > basePeak * 1.25, `walk ${basePeak.toFixed(2)} -> sprint ${sprintPeak.toFixed(2)} m/s`);
-    const released = await M.evaluate(() => {
+    // --- SPRINT BUTTON (Feature 3: tap-to-toggle LOCKED sprint, GOLD) ---
+    const resetSprint = () => M.evaluate(() => {
       const c = window.__debug.controller;
-      return c.sprintHeld === false && c.sprintLock === false;
+      c.sprint.lock = false; c.sprint.stickSprint = false; c.sprint.rimHoldStart = null;
     });
-    check('sprint button releases on touchend (never sticks ON)', released);
+    // keyboard-only peak speed on THIS page (M). Sprinting is measured from
+    // the controller's own speed2D so geometry can never produce a false read.
+    const kbPeak = async (lockedSprint) => {
+      await resetSprint();
+      if (lockedSprint) {
+        await M.evaluate(() => { window.__debug.controller.sprint.lock = true; });
+      }
+      await M.evaluate(() => { window.__debug.controller.camYaw = Math.PI; });
+      await M.keyboard.down('w');
+      let peak = 0;
+      for (let i = 0; i < 20; i++) {
+        peak = Math.max(peak, await M.evaluate(() => window.__debug.controller.speed2D));
+        await sleep(50);
+      }
+      await M.keyboard.up('w');
+      await resetSprint();
+      await sleep(150);
+      return peak;
+    };
+    const walkM = await kbPeak(false);
+    await putAt(M, 31.5, 0, 33.5); await sleep(120);
+    await touchTap(M, '#btn-sprint', 80);          // tap = lock ON
+    await sleep(100);
+    const locked = await M.evaluate(() => window.__debug.controller.sprint.lock);
+    check('tapping the 🏃 button toggles sprint LOCK on', locked === true);
 
-    // tap-to-lock sprint
-    await touchTap(M, '#btn-sprint', 80);
+    const sprintM = await kbPeak(true);            // W only, no Shift — but locked
+    check('locked sprint (no Shift) runs at sprint speed',
+      sprintM > walkM * 1.25, `walk ${walkM.toFixed(2)} -> locked ${sprintM.toFixed(2)} m/s`);
+
+    await putAt(M, 31.5, 0, 33.5); await sleep(120);
+    await touchTap(M, '#btn-sprint', 80);          // tap = lock ON
     await sleep(100);
-    const locked = await M.evaluate(() => window.__debug.controller.sprintLock);
-    check('a quick tap toggles sprint LOCK on', locked === true);
-    await touchTap(M, '#btn-sprint', 80);
+    const gold = await M.evaluate(() => ({
+      lock: window.__debug.controller.sprint.lock,
+      btnOn: document.getElementById('btn-sprint').classList.contains('sprint-on'),
+      charGold: window.__debug.controller.sprint.lock === true,
+    }));
+    check('locked sprint shows the GOLD indicator (🏃 button glows)',
+      gold.lock && gold.btnOn, JSON.stringify(gold));
+
+    await touchTap(M, '#btn-sprint', 80);          // tap again = lock OFF
     await sleep(100);
-    const unlocked = await M.evaluate(() => window.__debug.controller.sprintLock);
-    check('tapping again turns sprint lock off', unlocked === false);
+    const unlocked = await M.evaluate(() => window.__debug.controller.sprint.lock);
+    check('tapping the 🏃 button again turns sprint lock off', unlocked === false);
+
+    // --- Feature 3: 1s joystick rim-hold ARMS the lock; next touch cancels ---
+    await putAt(M, 31.5, 0, 33.5); await sleep(150);
+    await resetSprint();
+    await joystickHold(M, 0, -90, 1400);           // hold at the rim past 1s
+    await sleep(150);
+    const armed = await M.evaluate(() => window.__debug.controller.sprint.lock);
+    check('holding the joystick at the rim ~1s LOCKS sprint on', armed === true);
+    const persists = await M.evaluate(() => window.__debug.controller.sprint.lock === true);
+    check('sprint stays LOCKED after the stick returns to centre', persists);
+    // the NEXT new joystick touch becomes normal walking (cancels the lock)
+    await joystickHold(M, 0, -12, 200);
+    await sleep(100);
+    const cancelled = await M.evaluate(() => window.__debug.controller.sprint.lock);
+    check('the NEXT new joystick touch turns sprint lock off', cancelled === false);
+    await resetSprint();
 
     // --- JUMP BUTTON ---
     /** Wait until the character is standing on the ground and settled. */
@@ -626,17 +653,23 @@ try {
     const rise2 = await jumpAndMeasure(1);
     check('a sub-frame jump tap is latched, not dropped', rise2 > 0.3, `rose ${rise2.toFixed(2)} m`);
 
-    // --- touchcancel must not leave sprint stuck ---
+    // --- touchcancel must not leave the joystick running ---
+    await putAt(M, 31.5, 0, 33.5); await sleep(120);
+    await M.evaluate(() => { const c = window.__debug.controller; c.sprint.lock = false; c.sprint.rimHoldStart = null; });
+    await joystickHold(M, 0, -90, 250);   // start a rim hold (sprinting)
     await M.evaluate(() => {
-      const el = document.getElementById('btn-sprint');
-      const r = el.getBoundingClientRect();
-      const t = new Touch({ identifier: 11, target: el, clientX: r.left + 5, clientY: r.top + 5 });
-      el.dispatchEvent(new TouchEvent('touchstart', { bubbles: true, cancelable: true, touches: [t], targetTouches: [t], changedTouches: [t] }));
-      el.dispatchEvent(new TouchEvent('touchcancel', { bubbles: true, cancelable: true, touches: [], targetTouches: [], changedTouches: [t] }));
+      const el = document.getElementById('joystick');
+      const t = new Touch({ identifier: 42, target: el, clientX: 0, clientY: 0 });
+      window.dispatchEvent(new TouchEvent('touchcancel', { bubbles: true, cancelable: true, touches: [], targetTouches: [], changedTouches: [t] }));
     });
-    await sleep(100);
-    const afterCancel = await M.evaluate(() => window.__debug.controller.sprintHeld);
-    check('touchcancel releases sprint (iOS gesture interruption)', afterCancel === false);
+    await sleep(120);
+    const afterCancel = await M.evaluate(() => {
+      const c = window.__debug.controller;
+      return { stick: c.sprint.stickSprint, x: c.input.x, z: c.input.z };
+    });
+    check('touchcancel releases the joystick (never sticks running)',
+      !afterCancel.stick && Math.abs(afterCancel.x) < 0.01 && Math.abs(afterCancel.z) < 0.01, JSON.stringify(afterCancel));
+    await M.evaluate(() => { window.__debug.controller.sprint.lock = false; });
 
     // --- look zone drags the camera ---
     const yawBefore = await M.evaluate(() => window.__debug.controller.camYaw);
@@ -662,17 +695,17 @@ try {
     // --- backgrounding the tab must release held inputs ---
     await M.evaluate(() => {
       const c = window.__debug.controller;
-      c.sprintHeld = true; c.sprintLock = true; c.input.jump = true; c.input.x = 1;
+      c.sprint.lock = true; c.sprint.stickSprint = true; c.input.jump = true; c.input.x = 1;
       Object.defineProperty(document, 'hidden', { value: true, configurable: true });
       document.dispatchEvent(new Event('visibilitychange'));
     });
     await sleep(200);
     const afterBg = await M.evaluate(() => {
       const c = window.__debug.controller;
-      return { sprintHeld: c.sprintHeld, sprintLock: c.sprintLock, jump: c.input.jump, x: c.input.x };
+      return { sprintLock: c.sprint.lock, stickSprint: c.sprint.stickSprint, jump: c.input.jump, x: c.input.x };
     });
     check('backgrounding releases every held input',
-      !afterBg.sprintHeld && !afterBg.sprintLock && !afterBg.jump && afterBg.x === 0, JSON.stringify(afterBg));
+      !afterBg.sprintLock && !afterBg.stickSprint && !afterBg.jump && afterBg.x === 0, JSON.stringify(afterBg));
     await M.evaluate(() => {
       Object.defineProperty(document, 'hidden', { value: false, configurable: true });
       document.dispatchEvent(new Event('visibilitychange'));
@@ -727,14 +760,14 @@ try {
     }, null, { timeout: 45000 }).then(() => true).catch(() => false);
     check('remote audio track received by the peer', gotTrack);
 
-    // push-to-talk gates the outgoing track
-    await V1.evaluate(() => window.__debug.voice.setPtt(true));
-    await sleep(400);
+    // ---- Feature 2: mic is a TAP-TO-TOGGLE, no push-to-talk / hold. ----
+    // With the device granted the mic is already live (open), so the outgoing
+    // track is enabled without any "hold to talk" gesture.
     const txOn = await V1.evaluate(() => {
       const s = window.__debug.voice.provider.localStream;
-      return s.getAudioTracks().every((t) => t.enabled);
+      return s && s.getAudioTracks().every((t) => t.enabled);
     });
-    check('push-to-talk enables the outgoing track', txOn);
+    check('mic ON transmits immediately (tap-to-toggle, no push-to-talk)', txOn);
 
     // the talking indicator lights up on the OTHER client
     const remoteTalking = await V2.waitForFunction(
@@ -753,20 +786,33 @@ try {
     ).then(() => true).catch(() => false);
     check('local speaking indicator lights up for yourself', selfTalking);
 
-    await V1.evaluate(() => window.__debug.voice.setPtt(false));
+    // tapping MIC OFF (disableMic) closes the track and drops the device
+    await V1.evaluate(() => window.__debug.voice.toggleMic());
     await sleep(400);
-    const txOff = await V1.evaluate(() =>
-      window.__debug.voice.provider.localStream.getAudioTracks().every((t) => !t.enabled));
-    check('releasing push-to-talk closes the track', txOff);
+    const micOff = await V1.evaluate(() => ({
+      hasMic: window.__debug.voice.provider?.hasMic(),
+      micOn: window.__debug.voice.micOn,
+      tag: document.getElementById('btn-mic').querySelector('.mic-tag').textContent,
+    }));
+    check('tapping MIC OFF turns the mic off',
+      micOff.micOn === false && micOff.hasMic === false && micOff.tag === 'MIC OFF', JSON.stringify(micOff));
 
-    // REGRESSION: muted + PTT must not transmit
+    // tapping MIC ON re-enables and transmits again
+    await V1.evaluate(() => window.__debug.voice.toggleMic());
+    await sleep(400);
+    const micOn2 = await V1.evaluate(() => ({
+      micOn: window.__debug.voice.micOn,
+      tx: window.__debug.voice.provider.localStream.getAudioTracks().every((t) => t.enabled),
+    }));
+    check('tapping MIC ON turns the mic back on and transmits', micOn2.micOn && micOn2.tx, JSON.stringify(micOn2));
+
+    // REGRESSION: a MUTED mic must not transmit even though the device is on
     await V1.evaluate(() => window.__debug.voice.setMuted(true));
-    await V1.evaluate(() => window.__debug.voice.setPtt(true));
     await sleep(300);
     const leaked = await V1.evaluate(() =>
       window.__debug.voice.provider.localStream.getAudioTracks().some((t) => t.enabled));
-    check('REGRESSION: push-to-talk while MUTED does not transmit', !leaked);
-    await V1.evaluate(() => { window.__debug.voice.setPtt(false); window.__debug.voice.setMuted(false); });
+    check('REGRESSION: a MUTED mic does not transmit', !leaked);
+    await V1.evaluate(() => window.__debug.voice.setMuted(false));
 
     // mic on/off + speaker mute buttons exist, are visible, and work.
     // They are duplicated in the lobby voice panel and the in-game HUD top bar
@@ -801,17 +847,27 @@ try {
       [...window.__debug.voice.provider.peers.values()].every((p) => !p.audioEl.muted));
     check('unmuting the speaker restores incoming audio', unmuted);
 
+    // Feature 2: the mic ON/OFF toggle now fully turns the mic off (device
+    // released, indicator goes away). Check the state, not the (now-released)
+    // localStream.
     await V1.click('#btn-mic-toggle-lobby');
     await sleep(400);
-    const micOff = await V1.evaluate(() => ({
-      muted: window.__debug.voice.muted,
+    const micBtnState = await V1.evaluate(() => ({
+      micOn: window.__debug.voice.micOn,
+      hasMic: !!window.__debug.voice.provider?.hasMic(),
       icon: document.getElementById('btn-mic-toggle').textContent.trim(),
-      tracksOff: window.__debug.voice.provider.localStream.getAudioTracks().every((t) => !t.enabled),
     }));
-    check('mic on/off button mutes the microphone and updates the icon',
-      micOff.muted === true && micOff.icon === '🚫' && micOff.tracksOff, JSON.stringify(micOff));
+    check('mic on/off button turns the mic OFF (tap-to-toggle)',
+      micBtnState.micOn === false && micBtnState.hasMic === false && micBtnState.icon === '🚫', JSON.stringify(micBtnState));
     await V1.click('#btn-mic-toggle-lobby');
-    await sleep(300);
+    await sleep(400);
+    const micBtnBack = await V1.evaluate(() => ({
+      micOn: window.__debug.voice.micOn,
+      hasMic: !!window.__debug.voice.provider?.hasMic(),
+      tx: window.__debug.voice.provider?.localStream.getAudioTracks().every((t) => t.enabled),
+    }));
+    check('tapping the mic button again turns it back ON and transmits',
+      micBtnBack.micOn && micBtnBack.hasMic && micBtnBack.tx, JSON.stringify(micBtnBack));
 
     // per-player volume control in the lobby panel
     const volSliders = await V1.evaluate(() => document.querySelectorAll('[data-vol]').length);
@@ -1182,6 +1238,101 @@ try {
     check(`room caps at maxPlayers (${max}) and rejects the next joiner`,
       /full/i.test(fullMsg || ''), (fullMsg || '').trim());
     for (const p of pagesFull) await p.context().close();
+  }
+
+  section('7. Chat (Feature 5) + Controls (Feature 6) + voice status (Feature 1)');
+  {
+    // ---- Feature 5: text chat ----
+    const C1 = await mkPage('Chat-1', { viewport: { width: 420, height: 800 } });
+    const C2 = await mkPage('Chat-2', { viewport: { width: 420, height: 800 } });
+    const chatCode = await createRoom(C1, 'ChatA');
+    await joinRoom(C2, 'ChatB', chatCode);
+    await sleep(600);
+
+    await C1.fill('#chat-input-lobby', 'hello lobby');
+    await C1.click('#chat-send-lobby');
+    const c2got = await C2.waitForFunction(
+      () => document.getElementById('chat-messages-lobby').children.length >= 1,
+      null, { timeout: 8000 },
+    ).then(() => true).catch(() => false);
+    check('lobby chat reaches the other player', c2got);
+    const chatText = await C2.evaluate(() => document.getElementById('chat-messages-lobby').textContent);
+    check('lobby chat carries the sender + text', /ChatA/.test(chatText) && /hello lobby/.test(chatText), chatText.slice(0, 60));
+
+    // quick message
+    await C1.click('#chat-quick-lobby button[data-q="0"]');
+    const c2gotQuick = await C2.waitForFunction(
+      () => document.getElementById('chat-messages-lobby').children.length >= 2,
+      null, { timeout: 8000 },
+    ).then(() => true).catch(() => false);
+    check('quick-message button sends', c2gotQuick);
+
+    // ---- Feature 6: custom controls (CONTROLS screen is in the LOBBY) ----
+    await C1.click('#btn-controls');
+    const controlsOpen = await C1.evaluate(() => !document.getElementById('modal-controls').classList.contains('hidden'));
+    check('CONTROLS screen opens from the lobby', controlsOpen);
+    await C1.evaluate(() => {
+      const el = document.querySelector('#controls-settings input[data-key="lookSensitivity"]');
+      el.value = '1.9';
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await C1.click('#btn-controls-save');
+    await sleep(600);
+    const ctrlSaved = await C1.evaluate(() => JSON.parse(localStorage.getItem('hs_controls') || '{}'));
+    const serverCtrl = await C1.evaluate(async () => {
+      const deviceId = localStorage.getItem('hs_device_id');
+      const code = localStorage.getItem('hs_game_code') || '';
+      return await window.__debug.net.request('controls:get', { deviceId, code });
+    });
+    check('controls saved locally (lookSensitivity 1.9)', Math.abs((ctrlSaved.lookSensitivity ?? 0) - 1.9) < 0.01, String(ctrlSaved.lookSensitivity));
+    check('controls persisted to the SERVER keyed by device/code', Math.abs((serverCtrl?.controls?.lookSensitivity ?? 0) - 1.9) < 0.01, JSON.stringify(serverCtrl?.controls?.lookSensitivity));
+
+    // ---- Feature 1: ICE servers (STUN/TURN) applied to the voice provider ----
+    const iceApplied = await C1.evaluate(() => (window.__debug.voice.iceServers ?? []).length >= 1);
+    check('ICE servers (STUN) from /api/config applied to the voice provider', iceApplied);
+
+    // start a match to test the in-game team-split chat + chat overlay
+    await hostSettings(C1, { minPlayers: 2, preparationSec: 5, roundSec: 300 });
+    await C2.click('#btn-ready');
+    await sleep(300);
+    await C1.click('#btn-start');
+    await waitPhase(C1, 'ACTIVE_ROUND', 40000);
+
+    const chatBtnVisible = await C1.isVisible('#btn-chat');
+    check('in-game chat button is present', chatBtnVisible);
+    await C1.click('#btn-chat');
+    const overlayShown = await C1.evaluate(() => !document.getElementById('chat-overlay').classList.contains('hidden'));
+    check('in-game chat overlay opens', overlayShown);
+    const hudChannel = await C1.evaluate(() => document.getElementById('chat-channel-hud').textContent);
+    check('in-game chat channel label shows the team',
+      hudChannel === 'HIDERS' || hudChannel === 'SEEKERS', hudChannel);
+
+    // team-split: a message from C1 reaches C2 iff they are the same team
+    const [t1, t2] = await Promise.all([
+      C1.evaluate(() => window.__debug.store.get().myTeam),
+      C2.evaluate(() => window.__debug.store.get().myTeam),
+    ]);
+    await C1.fill('#chat-input-hud', 'team secret');
+    await C1.click('#chat-send-hud');
+    await sleep(900);
+    const c2msg = await C2.evaluate(() => document.getElementById('chat-messages-hud').children.length);
+    const sameTeam = t1 === t2;
+    check('in-game chat is TEAM-ONLY (no cross-team leak)',
+      (sameTeam && c2msg >= 1) || (!sameTeam && c2msg === 0),
+      `t1=${t1} t2=${t2} sameTeam=${sameTeam} c2msg=${c2msg}`);
+    await C1.click('#btn-chat'); // close overlay
+
+    // ---- Feature 1: visible voice status in the HUD ----
+    const micBtnOk = await C1.evaluate(() => {
+      const el = document.getElementById('btn-mic');
+      return !!el && el.getBoundingClientRect().width > 0;
+    });
+    check('in-game mic button is present (tap-to-toggle)', micBtnOk);
+    const statusPill = await C1.evaluate(() => !!document.getElementById('pill-voice-status'));
+    check('in-game VOICE STATUS pill exists (Feature 1)', statusPill);
+
+    await C1.context().close();
+    await C2.context().close();
   }
 
   // ---------------------------------------------------------------- report --

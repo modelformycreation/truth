@@ -38,26 +38,31 @@ browser tab (or your phone) and join with the room code for a real opponent.
 1. Start the server, find your computer's LAN IP (`ipconfig` / `ifconfig`).
 2. On the phone, open `http://THAT-IP:8080`.
 3. Left thumb = virtual joystick, right side drag = camera, buttons for
-   jump/sprint. Hold **🎤** (or `V` on desktop) to talk.
+   jump/sprint/FIND/scan/mic. Tap **🎤** to turn your mic on, tap again to turn
+   it off.
 
 ### Controls
 
 | Action | Mobile | Desktop |
 |---|---|---|
-| Move | virtual joystick | `WASD` / arrows |
+| Move | virtual joystick (springs back to centre; side & size customisable) | `WASD` / arrows |
 | Look | drag right side of screen | mouse (drag or pointer lock) — drag down looks down (toggle *Invert look Y* in settings to flip) |
-| Sprint | joystick to the edge / `🏃` (hold or tap-to-lock) | `Shift` |
+| Sprint (Free Fire-style, locked) | joystick held at the rim **~1 s** then release **or** tap `🏃` → character keeps sprinting (GOLD glow); tap `🏃` again or a new joystick touch to cancel | `Shift` (hold) |
 | Jump | `⬆` (taps under one frame still count) | `Space` |
-| **FIND (seekers)** | big 🔎 button | `F` or click |
-| **Scan pulse (seekers)** | 📡 button (above the sprint cluster) | `Q` — pings revealed hiders within 18 m, 25 s cooldown |
-| Push-to-talk | hold `🎤` | hold `V` |
-| Mic on/off | 🎤 button in HUD **and** lobby | `M` (or the button) |
+| **FIND (seekers)** | big 🔎 button (draggable) | `F` or click |
+| **Scan pulse (seekers)** | 📡 button (draggable) | `Q` — pings revealed hiders within 18 m, 25 s cooldown |
+| Mic on/off (tap, no hold) | 🎤 button in HUD **and** lobby | `M` (or the button) |
 | Speaker mute (deafen) | 🔇 button in HUD **and** lobby | `N` or the button |
+| Chat | 💬 button in HUD + lobby panel (quick messages) | `Enter` in chat box |
 | Per-player volume | lobby voice panel (slider per player) | lobby voice panel |
+| **Custom controls** | lobby → **🕹 CONTROLS** (drag buttons anywhere, size/side of joystick, sprint mode) | same |
 
 The camera is a normal (non-inverted) third-person orbit: dragging the mouse
 **down** looks **down**, dragging **right** rotates the view right. This was a
 reported bug — see [Changelog](#-changelog).
+
+The **minimap** is fixed north-up — only your arrow rotates to point the way
+you face (fixed 180° pointing error).
 
 ---
 
@@ -161,14 +166,18 @@ pings revealed hiders within 18 m on a 25 s cooldown.
 Real-time voice with **hard team isolation**: the server assigns each player
 to their team's channel when the round starts and **only relays WebRTC
 signaling inside a channel** — a modified client cannot talk across teams.
-Push-to-talk (default) or open mic, always-visible **mic on/off** and
-**speaker mute** buttons (HUD + lobby), per-player volume sliders in the
-lobby voice panel, speaking indicators (nameplate 🎤 + HUD chips), permission
-handling, and automatic channel switching (shared lobby channel between
-rounds). Muting is leak-proof: a muted mic cannot transmit even while
-push-to-talk is held. Audio flows peer-to-peer (WebRTC mesh + free STUN) —
-no voice server cost. The provider is behind a swappable interface
-(`client/js/voice/`) so LiveKit/Photon Voice/Vivox can drop in later.
+The mic is a **tap-to-toggle** on/off (tap = talk, tap again = off) with a
+visible **VOICE STATUS** (MIC: LIVE / ICE CONNECTING / CONNECTED / FAILED) in
+the HUD + lobby so a failed relay is never silent. Speaker mute (deafen),
+per-player volume sliders, speaking indicators (nameplate 🎤 + HUD chips),
+permission handling, and automatic channel switching (shared lobby channel
+between rounds). Audio flows peer-to-peer (WebRTC mesh) — no voice server
+cost. The provider is behind a swappable interface (`client/js/voice/`) so
+LiveKit/Photon Voice/Vivox can drop in later.
+
+**Same-network play** needs only STUN (the default). **Cross-network play**
+(players on different home networks) needs a TURN relay — see
+[Setting up cross-network voice (TURN)](#-setting-up-cross-network-voice-turn).
 
 ---
 
@@ -192,7 +201,25 @@ hide-and-seek/
 │   ├── movement.js       #   speed/teleport/phase validation → corrections
 │   ├── catch.js          #   THE FIND validation (distance + LOS + status)
 │   ├── visibility.js     #   per-viewer filtered snapshots (no wall-hacks)
-│   └── voice.js          #   team channel assignment + signaling relay
+│   ├── voice.js          #   team channel assignment + signaling relay
+│   ├── turn.js           #   TURN (cross-network voice) credential generation
+│   ├── controls.js       #   per-player custom-control persistence (code/device)
+│   └── chat.js           #   text chat (see game-room.sendChat)
+├── client/               # mobile-first web client (Three.js, no build step)
+│   ├── index.html        #   screens: home / lobby / HUD / results / settings
+│   ├── css/style.css     #   mobile-first UI
+│   ├── vendor/           #   three.js (vendored, runs offline)
+│   └── js/
+│       ├── main.js       #     boot, screen orchestration, game loop
+│       ├── world.js      #     3D scene (one merged mesh = tiny draw-call count)
+│       ├── avatar.js     #     characters + procedural animation + nameplates
+│       ├── controller.js #     input, physics, collision, ladders, camera, net
+│       ├── remote.js     #     interpolated remote players
+│       ├── chat.js       #     text chat UI (lobby + in-game overlay)
+│       ├── controls.js   #     device id / game code + local control persistence
+│       ├── controls-ui.js#     the CONTROLS screen (drag buttons, etc.)
+│       ├── visibility→server, hud.js, minimap.js, lobby.js, audio.js (synth SFX)
+│       └── voice/        #     provider interface + WebRTC mesh implementation
 ├── client/               # mobile-first web client (Three.js, no build step)
 │   ├── index.html        #   screens: home / lobby / HUD / results / settings
 │   ├── css/style.css     #   mobile-first UI
@@ -234,27 +261,33 @@ reveal radius, movement speeds, voice, tick rates, anti-cheat tolerances…).
 - **Hosts** change the popular ones live in the lobby (clamped server-side).
 - **Server operators** can override anything via `config.local.json` (see
   `config.local.json.example`) or `PORT`, `MAX_ROOMS`, `STUN_URLS` env vars.
+- **Cross-network voice (TURN):** `TURN_SECRET`, `TURN_PUBLIC_IP`,
+  `TURN_REALM`, `TURN_PORT`, `TURN_TTL_SEC` (see
+  [Setting up cross-network voice (TURN)](#-setting-up-cross-network-voice-turn)).
+  No `TURN_SECRET` = STUN-only (fine for same-network play).
 - Nothing gameplay-related is hard-coded elsewhere — the catch radius appears
   once, in config.
 
 ## 🧪 Testing
 
 ```bash
-npm test            # 184 tests: unit (movement math, camera look convention,
-                    #   kick permissions, voice state, phase machine, remote
-                    #   interpolation, map) + full acceptance scenario (spec §38)
+npm test            # 214 tests: unit (movement math, camera look convention,
+                    #   kick permissions, voice state + toggle, sprint state
+                    #   machine, TURN creds, chat team-split, controls
+                    #   persistence, phase machine, remote interpolation, map)
+                    #   + full acceptance scenario (spec §38)
 npm run verify:map  # map connectivity + spawns + hide spots for EVERY map
                     #   (facility 210 / docks 81 / mall 64 nooks)
 # optional real-browser tools (see tools/BROWSER-TOOLS.md for one-time setup):
 #   browser-smoke.mjs     – boots a real headless browser against the client
 #   browser-e2e.mjs       – TWO real browsers play a full match incl. the FIND catch
-#   browser-matrix.mjs    – the strict-tester matrix: 106 checks across desktop
 #                           WASD + mouse-look convention, iPhone-13 touch
 #                           emulation (joystick/sprint/jump), a real WebRTC mic
 #                           exchange between two contexts (fake mics),
 #                           measurable SFX (WebAudio) firing, host
-#                           kick/remove-bot, a full match, and edge cases
-#                           (refresh rejoin, host migration, room full).
+#                           kick/remove-bot, a full match, chat + controls,
+#                           voice status, and edge cases (refresh rejoin,
+#                           host migration, room full).
 #                           Zero console errors allowed.
 #   map-smoke.mjs         – for EVERY map: create a room on it, verify the
 #                           client renders that map and spawns validly
@@ -280,6 +313,102 @@ fine for friend groups — see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for
 Fly.io/Railway/Render one-liners, VPS + systemd, and HTTPS notes (mic access
 requires HTTPS except on localhost).
 
+## 🌐 Setting up cross-network voice (TURN)
+
+Voice works automatically when everyone is on the **same network** (they can
+reach each other directly through STUN). It fails across two **different home
+networks** behind strict/symmetric NAT — WebRTC cannot find a path. The fix is
+a **TURN relay**: a small server that forwards the voice packets. This repo
+already generates short-lived TURN credentials and serves them to every client
+at `GET /api/config`; you only need to run Coturn and tell the game server
+where it is.
+
+> ⚠️ **GitHub Actions is NOT a viable TURN host.** Its runners are ephemeral,
+> expose no inbound ports, and have no stable public IP. Do not try to host
+> TURN there.
+
+### How the host sets it up (the recommended, free path)
+
+The user runs the game server on their **own laptop** and exposes it to
+friends with a Cloudflare Tunnel:
+```
+npm start                          # node server/index.js → :8080
+.\cloudflared-windows-amd64.exe tunnel --url http://localhost:8080
+```
+⚠️ **Cloudflare Tunnel only carries HTTP/WebSocket — it CANNOT carry TURN**
+(TURN is UDP/raw TCP). So the TURN relay must be reachable **separately**, not
+through cloudflared. The simplest free option is to run Coturn **on the same
+laptop** that hosts the game server:
+
+1. **Install Coturn** on the laptop.
+   ```bash
+   # Debian/Ubuntu
+   sudo apt install coturn
+   # or via Docker (any OS)
+   docker run -d --network host \
+     -e TURN_PORT=3478 \
+     coturn/coturn \
+     -n --log-file=stdout \
+     --listening-port=3478 \
+     --realm=blackwood \
+     --use-auth-secret --static-auth-secret=CHANGE_ME_STRONG_SECRET \
+     --min-port=49152 --max-port=65535 \
+     --external-ip=PUBLIC_IP
+   ```
+2. **Port-forward your home router** to the laptop: forward **UDP 3478**
+   (and TCP 3478 as a fallback) to the laptop's LAN IP. This makes the TURN
+   server reachable at your **public IP**.
+3. **Tell the game server** where the TURN relay is. Restart it with:
+   ```bash
+   TURN_SECRET=CHANGE_ME_STRONG_SECRET \
+   TURN_PUBLIC_IP=<your router's public IP> \
+   TURN_REALM=blackwood \
+   TURN_PORT=3478 \
+   npm start
+   ```
+   (`TURN_PUBLIC_IP` is auto-detected when omitted, but pinning it is safer.)
+
+The game server now serves every client:
+```
+stun:stun.l.google.com:19302, stun:stun1.l.google.com:19302,
+turn:USER:CRED@PUBLIC_IP:3478?transport=udp,tcp
+```
+with fresh `USER`/`CRED` (Coturn static-auth-secret HMAC credentials) on every
+`/api/config` request. The client's WebRTC `RTCPeerConnection` uses the full
+list, so a strict-NAT peer relays through your laptop's Coturn.
+
+### The CGNAT caveat — when this does NOT work
+
+Port-forwarding only works if your home connection has a **real public IP**.
+If you are behind **CGNAT** (common on mobile hotspots and some home ISPs —
+your router's "public IP" is actually shared), port-forwarding fails and your
+TURN relay will be unreachable. Symptom: `iceState` shows **ICE FAILED** for
+everyone even after setup.
+
+Fallbacks, in order of preference:
+1. **Ask your ISP for a static public IPv4** (or confirm you are not on CGNAT).
+2. **A small always-on VPS** (~$4/mo) — the correct 24/7 option. Run Coturn
+   there (same command above) and set `TURN_PUBLIC_IP` to the VPS's IP. Now the
+   TURN relay is up even when your laptop is off.
+3. **A managed TURN service** (e.g. Cloudflare Calls TURN or an Open Relay
+   project). No install, but costs a little per GB.
+
+### Status & debugging
+
+Every client shows a visible **VOICE STATUS**: `MIC: LIVE`, `ICE CONNECTING`,
+`CONNECTED`, or `ICE FAILED` — in the HUD and the lobby. If it never leaves
+`ICE CONNECTING`/`FAILED` cross-network: check the port-forward (from an
+external tool reach `TURN_PUBLIC_IP:3478`), confirm the laptop is on and
+running Coturn, and confirm you are not on CGNAT.
+
+> The real acceptance test is two real devices on different networks talking —
+> the laptop on, Coturn running, port-forward active. This sandbox cannot
+> verify that end-to-end (it has no public IP); it verifies the wiring: the
+> server issues correct short-lived TURN credentials and the client feeds them
+> into `iceServers`. See `server/turn.js` + `test/unit/turn.test.js`.
+
+---
+
 ## 💰 Cost, limitations, roadmap
 
 - **Zero cost at dev/friends scale**: Node server (free tiers), WebRTC p2p
@@ -301,6 +430,51 @@ config) is engine-agnostic and maps 1:1 to a Unity/Fusion port if you later
 want native apps. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## 📜 Changelog
+
+### 2026-08-22 (4) — cross-network voice (TURN), mic button, locked sprint, chat, custom controls
+- **Feature 1 — Cross-network voice via TURN (the #1 priority).** Voice worked
+  on the same network but failed across different home networks. The server now
+  generates short-lived Coturn credentials (username = expiry, credential =
+  base64 HMAC-SHA1) and serves STUN + TURN at `GET /api/config`; the client's
+  WebRTC `RTCPeerConnection` uses the full `iceServers` list. Added a visible
+  **VOICE STATUS** (MIC: LIVE / ICE CONNECTING / CONNECTED / FAILED) in the HUD
+  and lobby so a failed relay is never silent. New `server/turn.js` +
+  `test/unit/turn.test.js` (7 tests). Docs: README "Setting up cross-network
+  voice (TURN)" — Coturn install/config on the host laptop, router UDP/TCP 3478
+  port-forward, the CGNAT caveat, and the VPS / managed-TURN fallback. GitHub
+  Actions is explicitly documented as NOT a viable TURN host.
+- **Feature 2 — Mic is a tap-to-toggle button (no hold).** Push-to-talk / hold
+  `🎤` / `V` is removed. One tap = mic on (talk), tap again = off, working in
+  the lobby **and** in-game, on mobile and desktop. `setPtt`/`setMicMode` are
+  gone; `toggleMic()` fully releases the device (recording indicator goes
+  away). Regression-tested in `test/unit/voice-toggle.test.js`.
+- **Feature 3 — Free Fire-style LOCKED sprint with a GOLD indicator.** The
+  joystick always springs back to centre. Sprint is a persistent lock: hold the
+  stick at the rim ~1 s (config `sprintLockHoldSec`) then release, **or** tap
+  🏃 — the character keeps sprinting and glows **gold** (the 🏃 button and the
+  avatar). Tap 🏃 again, or the **next** new joystick touch, turns it off; the
+  touch that arms the lock does not self-cancel. Desktop Shift still works.
+  Pure state machine in `shared/sprint.js` + `test/unit/sprint.test.js`.
+- **Feature 4 — Minimap arrow fix.** The self-arrow pointed 180° the wrong way;
+  it now points where the player faces (`rotate(-yaw)`, driven by the actual
+  movement yaw) while the map stays fixed north-up. `test/unit/minimap-arrow.test.js`.
+- **Feature 5 — Text chat.** Lobby chat reaches everyone; **in-game chat is
+  team-only** (Hiders / Seekers channels, mirroring voice), with a quick-message
+  set and a server-enforced length cap + per-player rate limit. `chat.js` +
+  `test/unit/chat.test.js` + `test/unit/chat-client.test.js`.
+- **Feature 6 — Custom CONTROLS + persistence (device id + secret game code).**
+  A CONTROLS screen (lobby, before the game) edits look sensitivity, invert-Y,
+  joystick size/side, sprint mode, and **drag-to-reposition** the sprint/jump/
+  FIND/mic/scan buttons. Saved to localStorage AND the server keyed by the
+  device id (UUID, generated once) + the user's secret game code (asked on the
+  name screen the first time / when localStorage is cleared). Controls come
+  back across name/network/device changes. `shared/controls.js`,
+  `server/controls.js`, `client/js/controls.js`, `controls-ui.js` +
+  `test/unit/controls.test.js`.
+- **Tests:** 184 → **214** unit/integration (minimap arrow, mic toggle, sprint
+  state machine, TURN creds, chat server + client, controls). Browser matrix
+  now 123 checks incl. chat, controls, and voice status. Zero console errors.
+  Playtest panel: **100/100, gate passed.**
 
 ### 2026-08-22 (3) — floor-hole fix, map identities, painted faces, supply crates
 - **Fixed a real floor hole (found via playtest + new verifier):** the
