@@ -4,6 +4,29 @@
 // room settings allow. Hidden enemies are NEVER drawn.
 // ============================================================================
 
+/**
+ * Canvas rotation (radians) that makes the self arrow point the direction the
+ * player is FACING, on a FIXED north-up map (only the arrow rotates).
+ *
+ * The arrow is drawn pointing "up" in canvas space (its tip is at (0, -r)).
+ * After `ctx.rotate(θ)` a vector that pointed up points along
+ * `(sin θ, -cos θ)` in canvas coords (x→right, y→down). The player's world
+ * facing direction is `(-sin yaw, -cos yaw)` (avatar yaw 0 faces -Z; the map
+ * is north-up so world x→canvas x and world z→canvas y). For the arrow to
+ * point where the player faces we need `(sin θ, -cos θ) = (-sin yaw, -cos yaw)`,
+ * i.e. `θ = -yaw`.
+ *
+ * REGRESSION: this used to be `-yaw + Math.PI`, which pointed the arrow
+ * exactly 180° the wrong way (moving forward showed as moving backward). The
+ * map stays fixed — only the arrow rotates.
+ *
+ * @param {number} yaw the player's facing yaw (radians).
+ * @returns {number} the canvas `rotate()` angle.
+ */
+export function arrowRotation(yaw) {
+  return -yaw;
+}
+
 export class Minimap {
   constructor(canvas, map) {
     this.canvas = canvas;
@@ -107,7 +130,7 @@ export class Minimap {
     const sx = this._tx(self[0]), sy = this._tz(self[2]);
     c.save();
     c.translate(sx, sy);
-    c.rotate(-yaw + Math.PI);
+    c.rotate(arrowRotation(yaw));
     c.fillStyle = '#ffffff';
     c.beginPath();
     c.moveTo(0, -5.2);
