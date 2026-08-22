@@ -577,6 +577,35 @@ export class GameRoom {
     }
   }
 
+  // ------------------------------------------------------------ chat -------
+  /**
+   * Feature 5 — server-relayed text chat.
+   *   • In the LOBBY everyone in the room can chat freely.
+   *   • In a ROUND chat is TEAM-ONLY (Hiders channel / Seekers channel), which
+   *     mirrors the voice channels — no cross-team all-chat, so you cannot leak
+   *     a hider's position to the enemy.
+   * The server truncates length (config chatMaxLen) and the socket layer rate
+   * limits per player (config chatRatePerSec), so a spamming client cannot
+   * flood the room.
+   */
+  sendChat(player, text) {
+    const clean = String(text ?? '').trim().slice(0, this.cfg.chatMaxLen);
+    if (!clean) return;
+    const inRound = WORLD_PHASES.has(this.phase) && this.phase !== PHASES.LOBBY;
+    const payload = {
+      id: player.id,
+      name: player.name,
+      text: clean,
+      team: player.team,
+      channel: inRound ? player.team : 'lobby',
+    };
+    for (const p of this.players.values()) {
+      if (!p.connected) continue;
+      const visible = !inRound || p.team === player.team;
+      if (visible) p.send(EVENTS.CHAT_RECV, payload);
+    }
+  }
+
   // ------------------------------------------------------------ gameplay ---
 
   onMove(player, msg) {
