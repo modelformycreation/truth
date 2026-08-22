@@ -47,6 +47,13 @@ export function buildWorld(canvas, quality = 'medium', mapId = 'facility') {
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
   renderer.setPixelRatio(pixelRatio);
   renderer.setSize(innerWidth, innerHeight);
+  // Cinematic tone mapping + correct output colour space: without this the
+  // lit surfaces blow out and lose the per-map ambient identity. ACESFilmic
+  // rolls off highlights and shadows for a richer, more game-like look for
+  // essentially zero extra GPU cost.
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.05;
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
 
   const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.1, 220);
   camera.position.set(31, 3, 40);
