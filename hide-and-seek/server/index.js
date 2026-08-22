@@ -18,6 +18,8 @@ import { DEFAULT_CONFIG } from '../shared/config.js';
 import { RoomManager } from './rooms.js';
 import { serveStatic } from './static.js';
 import { attachSocketAPI } from './socket-api.js';
+import { buildIceConfig, detectPublicIp } from './turn.js';
+import { ControlsStore } from './controls.js';
 
 const ROOT = dirname(fileURLToPath(import.meta.url)); // .../server
 const PROJECT_ROOT = join(ROOT, '..');
@@ -41,8 +43,35 @@ if (!config.stunUrls) {
   config.stunUrls = 'stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302';
 }
 
+// ---- Feature 1: cross-network voice via TURN (Coturn on the host laptop) ----
+// TURN is configured purely through env vars (never hard-coded). When no
+// TURN_SECRET is set the server keeps serving STUN-only, which is correct for
+// same-network play. GitHub Actions is NOT a viable TURN host (ephemeral
+// runners, no inbound ports, no stable public IP) — see README "Setting up
+// cross-network voice (TURN)".
+const turnConfig = {
+  turnPublicIp: process.env.TURN_PUBLIC_IP || null,
+  turnSecret: process.env.TURN_SECRET || '',
+  turnRealm: process.env.TURN_REALM || 'blackwood',
+  turnPort: Number(process.env.TURN_PORT || 3478),
+  turnTtlSec: Number(process.env.TURN_TTL_SEC || 3600),
+};
+// Auto-detect the public IP only when the host did not pin one (best-effort).
+if (!turnConfig.turnPublicIp && turnConfig.turnSecret) {
+  detectPublicIp().then((ip) => {
+    if (ip) {
+      turnConfig.turnPublicIp = ip;
+      console.log(`[turn] auto-detected public IP ${ip} for TURN (set TURN_PUBLIC_IP to override)`);
+    } else {
+      console.warn('[turn] could not auto-detect a public IP — TURN disabled until TURN_PUBLIC_IP is set');
+    }
+  });
+}
+
 const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
 const manager = new RoomManager({ maxRooms: config.maxRooms, log });
+// Feature 6: per-player control persistence (keyed by game code / device id).
+const controls = new ControlsStore();
 
 // ---- http ---------------------------------------------------------------------
 const httpServer = createServer((req, res) => {
@@ -52,8 +81,16 @@ const httpServer = createServer((req, res) => {
     return;
   }
   if (req.url === '/api/config') {
+    // Feature 1: fresh short-lived TURN credentials on every request (they
+    // expire after `turnTtlSec`, so re-fetching keeps clients able to relay).
+    const ice = buildIceConfig({ stunUrls: config.stunUrls, ...turnConfig });
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ stunUrls: config.stunUrls, voiceEnabled: config.voiceEnabled }));
+    res.end(JSON.stringify({
+      stunUrls: config.stunUrls,
+      iceServers: ice.iceServers,
+      turn: ice.turn ?? null,
+      voiceEnabled: config.voiceEnabled,
+    }));
     return;
   }
   serveStatic(req, res);
@@ -67,7 +104,7 @@ const io = new Server(httpServer, {
   pingTimeout: 20_000,
   maxHttpBufferSize: 128 * 1024,
 });
-attachSocketAPI(io, manager, config, log);
+attachSocketAPI(io, manager, config, log, { controls });
 
 httpServer.listen(config.port, '0.0.0.0', () => {
   log(`Hide&Seek server listening on http://0.0.0.0:${config.port}`);

@@ -14,5 +14,17 @@
   "voiceEnabled": true,
   "reconnectGraceSec": 45,
   "roomIdleSec": 180,
-  "stunUrls": "stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302"
+  "stunUrls": "stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302",
+
+  // ---- chat (Feature 5) ----
+  "chatMaxLen": 140,          // max chars per chat message
+  "chatRatePerSec": 4,        // per-player chat rate limit
+
+  // ---- sprint lock (Feature 3) ----
+  "sprintLockHoldSec": 1      // seconds to hold the joystick at the rim to LOCK sprint
+
+  // ---- cross-network voice via TURN (Feature 1) ----
+  // These are read from the ENVIRONMENT (see README "Setting up cross-network
+  // voice (TURN)"), not this file:
+  //   TURN_SECRET, TURN_PUBLIC_IP, TURN_REALM, TURN_PORT, TURN_TTL_SEC
 }

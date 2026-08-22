@@ -37,7 +37,6 @@ const SETTING_DEFAULTS = {
   masterVolume: 0.8,
   sfxVolume: 0.9,
   voiceVolume: 1.0,
-  micMode: 'ptt',          // 'ptt' | 'open'
   lookSensitivity: 1.0,
   invertY: false,
   quality: 'medium',       // low | medium | high

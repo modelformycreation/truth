@@ -381,6 +381,7 @@ export function createAvatar({ id, name, team, isSelf = false, isBot = false }) 
     id, name, team, isSelf, isBot,
     found: false, revealed: false, talking: false,
     effect: null, // 'boost' | 'cloak' | null (supply crate effects)
+    sprint: false, // Feature 3: GOLD locked-sprint indicator on the character
     phase: 0, // gait phase (radians; 2π = one full stride pair)
   };
 
@@ -517,6 +518,15 @@ export function createAvatar({ id, name, team, isSelf = false, isBot = false }) 
       }
       ring.material.color.setHex(0x5b8cff);
       ring.material.opacity = 0.35 + 0.5 * p;
+    } else if (state.sprint && !state.found) {
+      // Feature 3: GOLD glow = sprint is LOCKED on (Free Fire-style indicator).
+      const p = 0.6 + 0.4 * Math.sin(now * 0.012);
+      for (const m of glowMats) {
+        m.emissive = m.emissive || new THREE.Color();
+        m.emissive.setRGB(1.0 * p, 0.82 * p, 0.2 * p);
+      }
+      ring.material.color.setHex(0xffd166);
+      ring.material.opacity = 0.3 + 0.25 * p;
     } else if (state.effect && EFFECTS[state.effect] && !state.found) {
       const [er, eg, eb] = EFFECTS[state.effect];
       const p = 0.45 + 0.4 * Math.sin(now * 0.008);
@@ -553,6 +563,8 @@ export function createAvatar({ id, name, team, isSelf = false, isBot = false }) 
     setRevealed(on) { state.revealed = !!on; },
     /** Active supply-crate effect glow: 'boost' (gold) | 'cloak' (cyan) | null. */
     setEffect(kind) { state.effect = kind || null; },
+    /** Feature 3: GOLD locked-sprint indicator on the character. */
+    setSprint(on) { state.sprint = !!on; },
     setTalking(on) { if (state.talking !== on) { state.talking = !!on; drawPlate(); } },
 
     /** Scan-pulse contact marker: flare this avatar for a couple of seconds. */

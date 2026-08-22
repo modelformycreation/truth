@@ -17,7 +17,12 @@ import { Minimap } from './minimap.js';
 import { RemotePlayers } from './remote.js';
 import { PlayerController } from './controller.js';
 import { createAvatar } from './avatar.js';
+import { Chat } from './chat.js';
 import { VoiceManager } from './voice/voice-manager.js';
+import { ControlsUI } from './controls-ui.js';
+import {
+  loadControls, saveControls, getDeviceId, getGameCode, setGameCode,
+} from './controls.js';
 import { buildWorld } from './world.js';
 import { EVENTS, PHASES, TEAMS, STATUS } from '../../shared/constants.js';
 
@@ -27,7 +32,7 @@ const WORLD_PHASES = new Set([PHASES.TEAM_ASSIGNMENT, PHASES.PREPARATION, PHASES
 // Build tag: shown on the home screen so players (and testers) can tell which
 // code they are actually running — an open tab keeps running the old build
 // until it is reloaded, and this is the fastest way to notice that.
-const BUILD = 'ff-2026-08-22b';
+const BUILD = 'ff-2026-08-22c';
 console.log(`[BLACKWOOD] client build ${BUILD}`);
 $('build-tag').textContent = BUILD;
 
@@ -42,6 +47,10 @@ if (IS_TOUCH) document.body.classList.add('touch-ui');
 
 // ---------------- singletons ----------------
 const settings = { ...SETTING_DEFAULTS, ...loadSettings() };
+// Feature 6: custom controls (look sens, invertY, joystick size/side, sprint
+// mode, draggable button positions) — loaded locally, applied live, saved
+// locally + on the server keyed by device id / secret game code.
+let controlsData = loadControls();
 const store = createStore({
   selfId: null, session: null, roomState: null, phase: PHASES.LOBBY,
   myTeam: null, myStatus: null, serverSettings: null, roomCfg: null,
@@ -76,9 +85,47 @@ function controllerSettings() {
   const cfg = currentCfg() ?? {};
   return {
     ...cfg,
-    lookSensitivity: settings.lookSensitivity,
-    invertY: settings.invertY,
+    lookSensitivity: controlsData.lookSensitivity,
+    invertY: controlsData.invertY,
   };
+}
+
+/**
+ * Feature 6 — apply custom controls to the live game:
+ *   • look sensitivity / invert-Y feed the controller (via controllerSettings)
+ *   • joystick size -> CSS var, joystick side -> body class
+ *   • sprint mode -> the controller's sprint behaviour
+ *   • draggable button positions -> inline left/top on the real touch buttons
+ */
+const BUTTON_IDS = {
+  sprint: 'btn-sprint', jump: 'btn-jump', find: 'btn-find', mic: 'btn-mic', scan: 'btn-scan',
+};
+function applyControls(c) {
+  controlsData = c;
+  // keep the legacy settings mirror in sync (used by the in-game settings modal)
+  settings.lookSensitivity = c.lookSensitivity;
+  settings.invertY = c.invertY;
+  saveSettings(settings);
+  // joystick size
+  document.documentElement.style.setProperty('--joy-size', String(c.joystickSize ?? 1));
+  // joystick side
+  document.body.classList.toggle('joystick-right', c.joystickSide === 'right');
+  // sprint mode
+  if (controller) controller.sprintMode = c.sprintMode;
+  // draggable button positions (null = use the default CSS position)
+  for (const [key, id] of Object.entries(BUTTON_IDS)) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    const b = c.buttons?.[key];
+    if (b && typeof b.x === 'number') {
+      el.style.left = `${b.x * 100}%`;
+      el.style.top = `${b.y * 100}%`;
+      el.classList.add('custom-pos');
+    } else {
+      el.style.left = ''; el.style.top = '';
+      el.classList.remove('custom-pos');
+    }
+  }
 }
 
 // ---------------- world lifecycle ----------------
@@ -157,6 +204,8 @@ function startLoop() {
       const boostLeft = meDto ? Math.max(0, (meDto.bf || 0) + skew - nowL) : 0;
       const cloakLeft = meDto ? Math.max(0, (meDto.cf || 0) + skew - nowL) : 0;
       selfAvatar.setEffect(boostLeft > 0 ? 'boost' : cloakLeft > 0 ? 'cloak' : null);
+      // Feature 3: GOLD locked-sprint indicator on the character
+      selfAvatar.setSprint(controller.sprint.lock);
       updatePowerChip(boostLeft, cloakLeft);
 
       // audio listener + minimap + FIND-button reference position
@@ -167,7 +216,7 @@ function startLoop() {
       if (snap && minimap) {
         minimap.showTeammates = cfg.minimapShowTeammates ?? true;
         minimap.showFound = cfg.minimapShowFound ?? true;
-        minimap.draw(controller.pos, controller.camYaw, snap.pl ?? [], store.get().myTeam, store.get().myStatus);
+        minimap.draw(controller.pos, controller.yaw, snap.pl ?? [], store.get().myTeam, store.get().myStatus);
         if (!settings.showFps) {
           $('floor-tag').textContent = (worldMapId === 'facility')
             ? (controller.pos[1] < -1.5 ? 'B1 ARCHIVES' : controller.pos[1] > 4 ? 'ROOFTOP' : 'GROUND')
@@ -188,9 +237,43 @@ function startLoop() {
       fpsCounter.value = fpsCounter.frames;
       fpsCounter.frames = 0;
       fpsCounter.t = now;
+      autoTuneQuality(fpsCounter.value);
     }
   };
   rafId = requestAnimationFrame(loop);
+}
+
+// ---------------- dynamic quality auto-tuner ----------------
+// The playtest panel's #1 requested upgrade: "a quality auto-tuner that drops
+// pixel ratio under load". When the smoothed FPS stays low (heavy scene / slow
+// device / throttled tab) we step the renderer's pixel ratio DOWN so the game
+// keeps running smoothly instead of glitching; when it recovers we ease it back
+// up — never above the user's chosen quality cap.
+const TUNE = {
+  cap: null,            // pixel-ratio cap from the user's quality setting
+  low: 0.85,            // multiplier below the cap when FPS is very low
+  high: 1.0,            // full cap when FPS is healthy
+  smooth: 1.0,          // current multiplier (0.85..1)
+  cooldown: 0,          // don't flip every second
+};
+const TUNE_BASE_PR = { low: 1, medium: 1.5, high: 2 };
+function setQualityCap(q) {
+  const dpr = Math.min(devicePixelRatio || 1, 2);
+  TUNE.cap = Math.min(dpr, TUNE_BASE_PR[q] ?? 1.5);
+}
+function autoTuneQuality(fps) {
+  if (!world) return;
+  const now = performance.now();
+  if (now < TUNE.cooldown) return;
+  TUNE.cooldown = now + 3000;
+  const cap = TUNE.cap ?? TUNE_BASE_PR[settings.quality] ?? 1.5;
+  let target = TUNE.smooth;
+  if (fps < 26) target = 0.8;          // struggling: drop pixel ratio hard
+  else if (fps < 34) target = 0.9;     // warm: drop a notch
+  else target = 1.0;                   // healthy: restore
+  if (Math.abs(target - TUNE.smooth) < 0.05) return;
+  TUNE.smooth = target;
+  world.renderer.setPixelRatio(cap * target);
 }
 
 // ---------------- proximity danger (hiders) ----------------
@@ -377,6 +460,7 @@ bus.on(`net:${EVENTS.GAME_TEAMS}`, ({ teams }) => {
   const myTeam = teams.HIDERS.some((p) => p.id === selfId) ? TEAMS.HIDERS
     : teams.SEEKERS.some((p) => p.id === selfId) ? TEAMS.SEEKERS : null;
   store.set({ myTeam, myStatus: myTeam === TEAMS.HIDERS ? STATUS.HIDDEN : STATUS.ACTIVE });
+  updateChatChannel();
   hud.setSelf(myTeam, store.get().myStatus);
   const names = (myTeam === TEAMS.SEEKERS ? teams.SEEKERS : teams.HIDERS).map((p) => p.name).join(', ');
   hud.showBanner(
@@ -400,7 +484,12 @@ bus.on(`net:${EVENTS.GAME_PHASE}`, (msg) => {
   if (WORLD_PHASES.has(msg.phase)) {
     enterWorld();
     if (selfAvatar && !selfAvatar.group.parent) world.scene.add(selfAvatar.group);
-    if (msg.phase === PHASES.TEAM_ASSIGNMENT) audio.unlock();
+    if (msg.phase === PHASES.TEAM_ASSIGNMENT) {
+      audio.unlock();
+      // a fresh round starts clean: wipe last round's chat in both boxes
+      lobbyChat?.clear();
+      hudChat?.clear();
+    }
     // The server places players at the CURRENT map's spawns (gathering / seeker
     // vestibule). We sync to that position from the next snapshot instead of
     // hard-coding coordinates — this is what makes multiple maps work.
@@ -411,6 +500,10 @@ bus.on(`net:${EVENTS.GAME_PHASE}`, (msg) => {
     exitWorld();
     lobby.showLobby();
     store.set({ myTeam: null, myStatus: null });
+    updateChatChannel();
+    // game is over — no leftover lobby/team chatter into the next room/session
+    lobbyChat?.clear();
+    hudChat?.clear();
   }
 });
 
@@ -460,6 +553,7 @@ store.subscribe((state, prev) => {
   if (state.session && state.session !== prev.session) {
     store.set({ selfId: state.session.playerId });
     voice.setSelfId(state.session.playerId);
+    syncControlsFromServer();
   }
   if (state.selfId && state.selfId !== prev.selfId && state.roomState?.phase === PHASES.LOBBY) {
     lobby.render(state.roomState);
@@ -467,7 +561,6 @@ store.subscribe((state, prev) => {
 });
 
 // ---------------- voice wiring ----------------
-voice.setMicMode(settings.micMode);
 voice.deafened = !!settings.deafened;
 voice._emitState();
 
@@ -480,19 +573,44 @@ const muteBtns = [$('btn-mute'), $('btn-mute-lobby')].filter(Boolean);
 const micToggleBtn = micToggleBtns[0];
 const muteBtn = muteBtns[0];
 
+// ---- Feature 1: visible VOICE STATUS (MIC: LIVE / ICE CONNECTING / CONNECTED
+//      / FAILED) in the HUD so a failed relay is never silent. ----
+function updateVoiceStatus(state) {
+  const el = $('pill-voice-status');
+  if (!el) return;
+  let cls = 'voice-status';
+  let text;
+  if (!state.hasMic || state.muted) {
+    cls += ' off'; text = '🎤 MIC OFF';
+  } else if (state.iceState === 'failed') {
+    cls += ' fail'; text = '🎤 ICE FAILED';
+  } else if (state.iceState === 'connecting') {
+    cls += ' busy'; text = '🎤 ICE CONNECTING';
+  } else {
+    cls += ' ok'; text = '🎤 LIVE';
+  }
+  el.textContent = text;
+  el.className = `hud-pill voice-status ${cls}`;
+  el.classList.remove('hidden');
+}
+
 bus.on('voice:state', (state) => {
   hud.onVoiceState(state);
   if (store.get().roomState?.phase === PHASES.LOBBY || store.get().phase === PHASES.LOBBY) lobby.renderVoice(state);
+  updateVoiceStatus(state);
 
-  // big push-to-talk button
+  // ---- Feature 2: the mic is a simple TAP-TO-TOGGLE on/off (no hold). ----
+  // The big round mic button is a mic ON/OFF switch, exactly like the top-bar
+  // toggle and the lobby toggle — all three flip the same state.
   const live = state.selfTalking || (state.transmitting && state.hasMic);
   micBtn.classList.toggle('talking', !!live);
   micBtn.classList.toggle('blocked', state.status === 'error');
-  micBtn.classList.toggle('off', !state.hasMic);
+  micBtn.classList.toggle('off', !state.hasMic || state.muted);
+  micBtn.classList.toggle('on', state.hasMic && !state.muted);
   micBtn.querySelector('.mic-tag').textContent =
-    !state.hasMic ? 'MIC OFF' : state.muted ? 'MUTED' : state.micMode === 'open' ? 'OPEN' : 'TALK';
+    !state.hasMic ? 'MIC OFF' : state.muted ? 'MIC OFF' : 'MIC ON';
 
-  // dedicated MIC ON/OFF toggle
+  // dedicated MIC ON/OFF toggle (HUD + lobby)
   const micUsable = state.hasMic && !state.muted;
   for (const b of micToggleBtns) {
     b.classList.toggle('on', micUsable);
@@ -515,41 +633,18 @@ bus.on('voice:state', (state) => {
   }
 });
 
-// --- push-to-talk (hold the big mic button, or V on desktop) ---
-const pttDown = (e) => {
-  e?.preventDefault();
-  audio.unlock();
-  // getUserMedia must be inside the gesture on iOS — request it, then latch PTT
-  if (!voice.provider?.hasMic()) {
-    voice.enableMic().then((ok) => { if (ok && micHeld) voice.setPtt(true); });
-    return;
-  }
-  voice.setPtt(true);
-};
-const pttUp = (e) => { e?.preventDefault(); voice.setPtt(false); };
-let micHeld = false;
-micBtn.addEventListener('touchstart', (e) => { micHeld = true; pttDown(e); }, { passive: false });
-const micRelease = (e) => { micHeld = false; pttUp(e); };
-micBtn.addEventListener('touchend', micRelease, { passive: false });
-micBtn.addEventListener('touchcancel', micRelease, { passive: false });
-micBtn.addEventListener('mousedown', (e) => { if (micHeld) return; micHeld = true; pttDown(e); });
-window.addEventListener('mouseup', () => { if (micHeld) { micHeld = false; voice.setPtt(false); } });
-micBtn.addEventListener('mouseleave', () => { if (micHeld) { micHeld = false; voice.setPtt(false); } });
-
-// --- MIC ON/OFF: acquires (or releases) the microphone device ---
+// --- MIC ON/OFF: ONE tap-to-toggle handler for every mic control (no hold). ---
+// Feature 2 removed push-to-talk entirely — there is no "hold to talk", only a
+// tap on = talk, tap again = off. It works in the lobby and in game, on mobile
+// (tap) and laptop (click).
 const onMicToggle = async () => {
   audio.unlock(); audio.click();
-  if (!voice.provider?.hasMic()) {
-    const ok = await voice.enableMic();
-    if (ok) { voice.setMuted(false); hud.toast('Microphone ON'); }
-    else hud.toast(voice.errorMsg || 'Microphone unavailable', true);
-    return;
-  }
-  // has a mic: toggle transmit permission without dropping the device
-  const nowMuted = !voice.muted;
-  voice.setMuted(nowMuted);
-  hud.toast(nowMuted ? 'Microphone muted' : 'Microphone ON');
+  const on = await voice.toggleMic();
+  if (on) hud.toast('Microphone ON');
+  else if (voice.errorMsg) hud.toast(voice.errorMsg, true);
+  else hud.toast('Microphone OFF');
 };
+micBtn.addEventListener('click', onMicToggle);
 for (const b of micToggleBtns) b.addEventListener('click', onMicToggle);
 
 // --- SPEAKER mute: stop hearing other players ---
@@ -564,13 +659,12 @@ for (const b of muteBtns) b.addEventListener('click', onSpeakerToggle);
 
 window.addEventListener('keydown', (e) => {
   if (e.target?.tagName === 'INPUT' || e.target?.tagName === 'SELECT') return;
-  if (e.code === 'KeyV' && !e.repeat) pttDown();
+  // V and M both toggle the mic on/off (push-to-talk was removed)
+  if ((e.code === 'KeyV' || e.code === 'KeyM') && !e.repeat) micToggleBtn.click();
   if (e.code === 'KeyF') $('btn-find').click();
-  if (e.code === 'KeyM') micToggleBtn.click();
   if (e.code === 'KeyN') muteBtn.click();
   if (e.code === 'KeyQ') $('btn-scan').click();
 });
-window.addEventListener('keyup', (e) => { if (e.code === 'KeyV') voice.setPtt(false); });
 
 // FIND button
 $('btn-find').addEventListener('click', async () => {
@@ -635,13 +729,12 @@ bus.on(`net:${EVENTS.ROOM_KICKED}`, ({ by }) => {
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
     controller?.releaseInputs();
-    voice.setPtt(false);
   } else {
     audio.unlock();
     lastFrame = performance.now(); // never integrate the whole background gap
   }
 });
-window.addEventListener('blur', () => { controller?.releaseInputs(); voice.setPtt(false); });
+window.addEventListener('blur', () => { controller?.releaseInputs(); });
 // device rotation (iOS fires this before the new size is settled)
 window.addEventListener('orientationchange', () => setTimeout(() => world?.resize(), 250));
 
@@ -654,7 +747,6 @@ function renderClientSettings() {
     { key: 'voiceVolume', label: 'Voice volume', type: 'range', min: 0, max: 1, step: 0.05, fmt: (v) => `${Math.round(v * 100)}%` },
     { key: 'lookSensitivity', label: 'Look sensitivity', type: 'range', min: 0.3, max: 2.5, step: 0.1, fmt: (v) => v.toFixed(1) },
     { key: 'invertY', label: 'Invert look Y', type: 'toggle' },
-    { key: 'micMode', label: 'Mic mode', type: 'select', options: [['ptt', 'Push-to-talk (hold 🎤 / V)'], ['open', 'Open mic']] },
     { key: 'quality', label: 'Graphics', type: 'select', options: [['low', 'Low (fastest)'], ['medium', 'Medium'], ['high', 'High']] },
     { key: 'showFps', label: 'Show FPS', type: 'toggle' },
   ];
@@ -689,7 +781,7 @@ function renderClientSettings() {
 function applySettings() {
   audio.setVolumes({ master: settings.masterVolume, sfx: settings.sfxVolume });
   voice.setVolume(settings.voiceVolume);
-  voice.setMicMode(settings.micMode);
+  setQualityCap(settings.quality);
   world?.setQuality(settings.quality);
 }
 
@@ -708,14 +800,117 @@ setInterval(() => {
   }
 }, 1000);
 
+// ---------------- chat (Feature 5) ----------------
+// One instance for the lobby panel (everyone), one for the in-game overlay
+// (team-only once a round is live). Both share the server-relayed stream.
+const chatChannelLabel = () => {
+  const team = store.get().myTeam;
+  return team === TEAMS.HIDERS ? 'HIDERS' : team === TEAMS.SEEKERS ? 'SEEKERS' : 'LOBBY';
+};
+const lobbyChat = new Chat({
+  net, bus,
+  messages: $('chat-messages-lobby'),
+  input: $('chat-input-lobby'),
+  sendBtn: $('chat-send-lobby'),
+  quickWrap: $('chat-quick-lobby'),
+  channelLabel: () => 'LOBBY',
+  getSelfId: () => store.get().selfId,
+  showChannel: (ch) => ch === 'lobby',
+});
+const hudChat = new Chat({
+  net, bus,
+  messages: $('chat-messages-hud'),
+  input: $('chat-input-hud'),
+  sendBtn: $('chat-send-hud'),
+  quickWrap: $('chat-quick-hud'),
+  channelLabel: chatChannelLabel,
+  getSelfId: () => store.get().selfId,
+  showChannel: (ch) => ch !== 'lobby',
+});
+
+function updateChatChannel() {
+  $('chat-channel-lobby').textContent = 'LOBBY';
+  $('chat-channel-hud').textContent = chatChannelLabel();
+  const cfg = currentCfg();
+  if (cfg?.chatMaxLen) { lobbyChat.setMaxLen(cfg.chatMaxLen); hudChat.setMaxLen(cfg.chatMaxLen); }
+}
+
+// the in-game chat overlay opens/closes with the 💬 HUD button
+const chatOverlay = $('chat-overlay');
+let chatUnread = 0;
+$('btn-chat').addEventListener('click', () => {
+  audio.click();
+  const hidden = chatOverlay.classList.contains('hidden');
+  chatOverlay.classList.toggle('hidden', !hidden);
+  chatUnread = 0;
+  if (!hidden) hudChat.input.focus();
+});
+// unread badge: light the 💬 button when a message arrives while closed
+bus.on(`net:${EVENTS.CHAT_RECV}`, (m) => {
+  if (chatOverlay.classList.contains('hidden') && m.id !== store.get().selfId) {
+    chatUnread += 1;
+    $('btn-chat').classList.add('chat-unread');
+    $('btn-chat').textContent = `💬`;
+  }
+  if (chatOverlay.classList.contains('hidden')) {
+    hud.toast(`${m.name}: ${m.text}`);
+  }
+});
+
+// ---------------- controls (Feature 6) ----------------
+const controlsUI = new ControlsUI({
+  getControls: () => controlsData,
+  onApply: (c) => applyControls(c),
+  onSave: (c) => {
+    applyControls(c);
+    saveControls(c);
+    const deviceId = getDeviceId();
+    const code = getGameCode();
+    net.request(EVENTS.CONTROLS_SAVE, { deviceId, code, controls: c })
+      .then((res) => { if (!res?.ok) hud.toast('Could not save controls to the server', true); });
+    hud.toast('Controls saved (device + game code)');
+  },
+});
+const openControls = () => { audio.click(); renderControlsCodeHint(); controlsUI.open(); };
+$('btn-controls').addEventListener('click', openControls);
+// in-game: the HUD also exposes the CONTROLS screen so players can tweak their
+// layout mid-match (changes apply live through applyControls)
+const hudControlsBtn = $('btn-controls-hud');
+if (hudControlsBtn) hudControlsBtn.addEventListener('click', openControls);
+// show the "remember your game code" hint in the controls screen
+function renderControlsCodeHint() {
+  const code = getGameCode();
+  $('controls-code-hint').textContent = code
+    ? `Saved under your game code "${code}" — enter it on any device to reload these controls.`
+    : 'Tip: set a secret game code on the home screen to carry these controls to any device.';
+}
+
+/** Fetch saved controls from the server (by device id / game code) and apply. */
+function syncControlsFromServer() {
+  const deviceId = getDeviceId();
+  const code = getGameCode();
+  if (!code && !deviceId) return;
+  net.request(EVENTS.CONTROLS_GET, { deviceId, code }).then((res) => {
+    if (res?.ok && res.controls) applyControls(res.controls);
+    renderControlsCodeHint();
+  });
+}
+applyControls(controlsData);
+
+
 // ---------------- boot ----------------
+// Feature 1: the server hands us the ICE servers (STUN + TURN with short-lived
+// credentials) at /api/config, so cross-network peers can relay voice through
+// the host's Coturn instead of failing on a strict NAT.
 fetch('/api/config').then((r) => r.json()).then((cfg) => {
   voice.setStun(cfg.stunUrls);
+  voice.setIceServers(cfg.iceServers || []);
 }).catch(() => {});
 net.connect();
 lobby.showHome();
 lobby.onLeave = () => {};
 applySettings();
+updateChatChannel();
 
 // QA/debug handle (used by tools/browser-*.mjs; harmless in production)
 window.__debug = {

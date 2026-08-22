@@ -90,6 +90,12 @@ test('FULL ACCEPTANCE SCENARIO', async () => {
     const room = manager.rooms.get(code);
     assert.equal(room.players.size, 7);
 
+    // This scenario asserts the deterministic distance/LOS catch ladder, so the
+    // random supply crates must be OFF: a hider walking across a random hide
+    // spot can pick up a 🕶 cloak crate and become uncatchable ("CLOAKED"),
+    // which intermittently broke the "find everyone -> SEEKERS WIN" loop.
+    room.roomSettings.itemsEnabled = false;
+
     // -- invalid room code join is rejected ------------------------------------
     const stray = await connect(url);
     const bad = await emitAck(stray, 'room:join', { code: 'ZZZZZZ', name: 'Nope' });
@@ -187,6 +193,11 @@ test('FULL ACCEPTANCE SCENARIO', async () => {
     const otherSeekerSocket = sockets[otherSeeker.name];
     bot.pos = [24.9, 0, 33];               // east of the reception shelf wall
     otherSeeker.pos = [22.9, 0, 33];       // west of it (1.6m away? -> 2.0m)
+    // Defense-in-depth: even though crates are disabled above, clear any live
+    // cloak/boost on the bot. A lingering 🕶 cloak would reject the catch with
+    // CLOAKED before the LOS rule is evaluated, failing this LOS-only check.
+    bot.cloakUntil = 0;
+    bot.boostUntil = 0;
     res = await emitAck(otherSeekerSocket, 'game:catch', { targetId: bot.id });
     assert.equal(res.ok, false);
     assert.equal(res.reason, 'NO_LINE_OF_SIGHT');

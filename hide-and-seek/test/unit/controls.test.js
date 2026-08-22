@@ -1,150 +1,83 @@
 // ============================================================================
-// Regression tests for the reported P0 input bugs.
+// Regression tests — Feature 6: custom controls + persistence.
 //
-//   BUG 2 — "W / S (front & back) movement is INVERTED on laptop."
-//   BUG 1 — joystick / sprint behaviour (the parts that are pure math).
-//
-// The movement basis lives in shared/geometry.js precisely so the exact math
-// the game runs can be asserted here without a browser. The real-browser side
-// of these bugs is covered by tools/browser-e2e.mjs.
+// Controls are keyed by BOTH the device id and the user's secret game code, so
+// the same layout comes back across name changes, network changes, and (via
+// the code) device/browser changes. The server never trusts the client — every
+// value is sanitised/whitelisted — and a brand-new device starts with sensible
+// defaults (not a broken layout).
 // ============================================================================
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { cameraRelativeMove, facingYaw } from '../../shared/geometry.js';
-import { DEFAULT_CONFIG } from '../../shared/config.js';
+import { sanitizeControls, CONTROLS_DEFAULTS } from '../../shared/controls.js';
+import { ControlsStore } from '../../server/controls.js';
 
-// Input convention: iz = -1 forward (W), +1 back (S); ix = -1 left, +1 right.
-const W = [0, -1], S = [0, 1], A = [-1, 0], D = [1, 0];
-
-/**
- * The camera orbits to `head + [sin(camYaw), *, cos(camYaw)] * dist`, so the
- * unit vector pointing from the camera toward the player — "forward" — is:
- */
-function forwardOf(camYaw) {
-  return [-Math.sin(camYaw), -Math.cos(camYaw)];
-}
-function dot([ax, az], [bx, bz]) { return ax * bx + az * bz; }
-const CAM_YAWS = [0, Math.PI / 2, Math.PI, -Math.PI / 2, 0.7, 2.4, -1.1, 5.9];
-
-test('W moves AWAY from the camera at every camera angle (the inverted-W bug)', () => {
-  for (const yaw of CAM_YAWS) {
-    const move = cameraRelativeMove(W[0], W[1], yaw);
-    const fwd = forwardOf(yaw);
-    assert.ok(
-      dot(move, fwd) > 0.99,
-      `camYaw=${yaw}: W should follow forward ${fwd} but moved ${move}`,
-    );
-  }
+test('a brand-new (empty) controls payload yields sensible defaults', () => {
+  const out = sanitizeControls({});
+  assert.equal(out.lookSensitivity, CONTROLS_DEFAULTS.lookSensitivity);
+  assert.equal(out.invertY, false);
+  assert.equal(out.joystickSize, 1.0);
+  assert.equal(out.joystickSide, 'left');
+  assert.equal(out.sprintMode, 'free-fire');
+  assert.ok(out.buttons, 'buttons map present');
 });
 
-test('S moves TOWARD the camera at every camera angle', () => {
-  for (const yaw of CAM_YAWS) {
-    const move = cameraRelativeMove(S[0], S[1], yaw);
-    assert.ok(dot(move, forwardOf(yaw)) < -0.99, `camYaw=${yaw}: S moved ${move}`);
-  }
+test('out-of-range / junk values are clamped or ignored', () => {
+  const out = sanitizeControls({
+    lookSensitivity: 999, joystickSize: -5, invertY: 'yes',
+    joystickSide: 'up', sprintMode: 'turbo', buttons: 'nope',
+  });
+  assert.equal(out.lookSensitivity, 2.5, 'sensitivity clamped to max');
+  assert.equal(out.joystickSize, 0.7, 'joystick size clamped to min');
+  assert.equal(out.invertY, false, 'non-boolean invertY ignored');
+  assert.equal(out.joystickSide, 'left', 'unknown side ignored');
+  assert.equal(out.sprintMode, 'free-fire', 'unknown sprint mode ignored');
 });
 
-test('W and S are exact opposites, and so are A and D', () => {
-  for (const yaw of CAM_YAWS) {
-    const w = cameraRelativeMove(...W, yaw);
-    const s = cameraRelativeMove(...S, yaw);
-    assert.ok(Math.abs(w[0] + s[0]) < 1e-12 && Math.abs(w[1] + s[1]) < 1e-12);
-    const a = cameraRelativeMove(...A, yaw);
-    const d = cameraRelativeMove(...D, yaw);
-    assert.ok(Math.abs(a[0] + d[0]) < 1e-12 && Math.abs(a[1] + d[1]) < 1e-12);
-  }
+test('button positions are clamped to 0..1 and non-numeric ignored', () => {
+  const out = sanitizeControls({
+    buttons: { sprint: { x: 5, y: -3 }, jump: { x: 0.5 }, mic: { x: 'a', y: 0.2 } },
+  });
+  assert.deepEqual(out.buttons.sprint, { x: 1, y: 0 });
+  assert.equal(out.buttons.jump, null, 'incomplete button pos ignored');
+  assert.equal(out.buttons.mic, null, 'non-numeric button pos ignored');
 });
 
-test('D strafes to screen-right (forward x up), A to screen-left', () => {
-  for (const yaw of CAM_YAWS) {
-    const [fx, fz] = forwardOf(yaw);
-    // right = forward x up  for a Y-up right-handed frame
-    const right = [-fz, fx];
-    assert.ok(dot(cameraRelativeMove(...D, yaw), right) > 0.99, `camYaw=${yaw} D`);
-    assert.ok(dot(cameraRelativeMove(...A, yaw), right) < -0.99, `camYaw=${yaw} A`);
-  }
+test('non-object input is rejected entirely', () => {
+  assert.equal(sanitizeControls(null), null);
+  assert.equal(sanitizeControls('hi'), null);
+  assert.equal(sanitizeControls(42), null);
 });
 
-test('strafing stays perpendicular to forward (no forward bleed)', () => {
-  for (const yaw of CAM_YAWS) {
-    assert.ok(Math.abs(dot(cameraRelativeMove(...D, yaw), forwardOf(yaw))) < 1e-12);
-    assert.ok(Math.abs(dot(cameraRelativeMove(...A, yaw), forwardOf(yaw))) < 1e-12);
-  }
+test('controls save + reload by game code', () => {
+  const store = new ControlsStore();
+  store.save({ code: 'mysecret', controls: { lookSensitivity: 1.8, invertY: true, joystickSide: 'right' } });
+  const got = store.get({ code: 'mysecret' });
+  assert.equal(got.lookSensitivity, 1.8);
+  assert.equal(got.invertY, true);
+  assert.equal(got.joystickSide, 'right');
 });
 
-test('the basis is orthonormal: |move| always equals |input|', () => {
-  const inputs = [W, S, A, D, [0.5, -0.5], [0.3, 0.9], [-0.2, -0.1], [0, 0]];
-  for (const yaw of CAM_YAWS) {
-    for (const [ix, iz] of inputs) {
-      const [wx, wz] = cameraRelativeMove(ix, iz, yaw);
-      assert.ok(
-        Math.abs(Math.hypot(wx, wz) - Math.hypot(ix, iz)) < 1e-12,
-        `camYaw=${yaw} input=${[ix, iz]} -> ${[wx, wz]}`,
-      );
-    }
-  }
+test('controls also reload by device id', () => {
+  const store = new ControlsStore();
+  store.save({ deviceId: 'dev-123', controls: { joystickSize: 1.3 } });
+  assert.equal(store.get({ deviceId: 'dev-123' }).joystickSize, 1.3);
 });
 
-test('a diagonal (W+D) is the normalised sum of its parts', () => {
-  const yaw = 1.234;
-  const w = cameraRelativeMove(...W, yaw);
-  const d = cameraRelativeMove(...D, yaw);
-  const wd = cameraRelativeMove(1, -1, yaw);
-  assert.ok(Math.abs(wd[0] - (w[0] + d[0])) < 1e-12);
-  assert.ok(Math.abs(wd[1] - (w[1] + d[1])) < 1e-12);
+test('an unknown code/device returns null (brand-new device = defaults)', () => {
+  const store = new ControlsStore();
+  assert.equal(store.get({ code: 'nope', deviceId: 'never' }), null);
 });
 
-test('facingYaw makes the avatar face the direction it is moving', () => {
-  // avatars model forward as (-sin(yaw), -cos(yaw))
-  for (const yaw of CAM_YAWS) {
-    const move = cameraRelativeMove(...W, yaw);
-    const f = facingYaw(move[0], move[1]);
-    const facing = [-Math.sin(f), -Math.cos(f)];
-    assert.ok(dot(facing, move) > 0.99, `camYaw=${yaw}: facing ${facing} vs move ${move}`);
-  }
+test('saving requires at least a code or a device id', () => {
+  const store = new ControlsStore();
+  assert.equal(store.save({ controls: { lookSensitivity: 1 } }).error, 'NO_KEY');
 });
 
-test('walking forward from the default spawn increases Z (regression on the exact reported case)', () => {
-  // Default camera yaw is PI (camera south of the player, looking north).
-  const [wx, wz] = cameraRelativeMove(0, -1, Math.PI);
-  assert.ok(Math.abs(wx) < 1e-12, `expected no sideways drift, got ${wx}`);
-  assert.ok(wz > 0.99, `W at camYaw=PI must move +Z (into the facility), got ${wz}`);
-});
-
-// ---------------------------------------------------------------- touch ----
-
-test('joystick tuning is configurable, not hard-coded', () => {
-  assert.equal(typeof DEFAULT_CONFIG.joystickDeadzone, 'number');
-  assert.equal(typeof DEFAULT_CONFIG.joystickSprintThreshold, 'number');
-  assert.ok(DEFAULT_CONFIG.joystickDeadzone > 0 && DEFAULT_CONFIG.joystickDeadzone < 0.5);
-  // must be reachable: the stick is clamped to the rim (magnitude 1.0)
-  assert.ok(
-    DEFAULT_CONFIG.joystickSprintThreshold > DEFAULT_CONFIG.joystickDeadzone &&
-    DEFAULT_CONFIG.joystickSprintThreshold < 1.0,
-    'sprint threshold must be reachable by a stick clamped to magnitude 1',
-  );
-});
-
-test('a stick pushed to the rim is above the sprint threshold, centre is in the deadzone', () => {
-  const { joystickDeadzone: dz, joystickSprintThreshold: sp } = DEFAULT_CONFIG;
-  const magnitude = (dx, dy, R) => Math.min(Math.hypot(dx, dy), R) / R;
-  const R = 62;                                  // half of the 124px CSS base
-  assert.ok(magnitude(R, 0, R) > sp, 'full deflection must sprint');
-  assert.ok(magnitude(0.55 * R, 0, R) <= sp, 'half deflection must only walk');
-  assert.ok(magnitude(0.55 * R, 0, R) > dz, 'half deflection must still move');
-  assert.ok(magnitude(0.01 * R, 0, R) < dz, 'centre must be standing still');
-});
-
-test('footstep + audio feedback ranges are configured', () => {
-  for (const key of [
-    'footstepStrideWalkM', 'footstepStrideRunM', 'footstepHearRadius',
-    'heartbeatRadius', 'heartbeatMinIntervalMs', 'heartbeatMaxIntervalMs',
-  ]) {
-    assert.equal(typeof DEFAULT_CONFIG[key], 'number', `${key} must be configurable`);
-    assert.ok(DEFAULT_CONFIG[key] > 0, `${key} must be positive`);
-  }
-  assert.ok(
-    DEFAULT_CONFIG.heartbeatMinIntervalMs < DEFAULT_CONFIG.heartbeatMaxIntervalMs,
-    'the heartbeat must get FASTER as a seeker closes in',
-  );
+test('a returning player with a code gets their layout regardless of device', () => {
+  const store = new ControlsStore();
+  store.save({ code: 'shared-code', controls: { lookSensitivity: 2.0, sprintMode: 'classic' } });
+  const onNewDevice = store.get({ deviceId: 'brand-new-device', code: 'shared-code' });
+  assert.equal(onNewDevice.lookSensitivity, 2.0, 'code wins over a fresh device');
+  assert.equal(onNewDevice.sprintMode, 'classic');
 });

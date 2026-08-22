@@ -13,7 +13,7 @@ import {
   EVENTS, PHASES, TEAMS, STATUS, MAX_NAME_LENGTH,
 } from '../shared/constants.js';
 import { effectiveSettings, sanitizeRoomSettings } from '../shared/config.js';
-import { getMap, computeHideSpots } from '../shared/map.js';
+import { getMap, computeHideSpots, MAPS } from '../shared/map.js';
 import { Player } from './players.js';
 import { assignTeams } from './teams.js';
 import { validateMove } from './movement.js';
@@ -238,6 +238,24 @@ export class GameRoom {
     this.roomSettings = { ...this.roomSettings, ...sanitizeRoomSettings(patch) };
     this.broadcastRoomState();
     return { ok: true };
+  }
+
+  /**
+   * Host changes the map from the lobby (before the round). Validated: host
+   * only, LOBBY only, and the id must be a known map. Re-resolves this.map so
+   * the next round spawns/snaps on the new geometry. Broadcasts the new
+   * room state (includes mapId) so every client rebuilds the world at start.
+   */
+  setMap(player, mapId) {
+    if (player.id !== this.hostId) return { error: 'NOT_HOST' };
+    if (this.phase !== PHASES.LOBBY) return { error: 'NOT_IN_LOBBY' };
+    const id = String(mapId ?? '');
+    if (!MAPS[id]) return { error: 'UNKNOWN_MAP' };
+    this.mapId = id;
+    this.map = getMap(id);
+    this.broadcastRoomState();
+    this.broadcast(EVENTS.GAME_FEED, { text: `Map set to ${this.map.name}`, kind: 'info' });
+    return { ok: true, mapId: id, mapName: this.map.name };
   }
 
   addBot(player) {
@@ -574,6 +592,35 @@ export class GameRoom {
           // seekers/found hiders walking over a cloak crate do nothing
         }
       }
+    }
+  }
+
+  // ------------------------------------------------------------ chat -------
+  /**
+   * Feature 5 — server-relayed text chat.
+   *   • In the LOBBY everyone in the room can chat freely.
+   *   • In a ROUND chat is TEAM-ONLY (Hiders channel / Seekers channel), which
+   *     mirrors the voice channels — no cross-team all-chat, so you cannot leak
+   *     a hider's position to the enemy.
+   * The server truncates length (config chatMaxLen) and the socket layer rate
+   * limits per player (config chatRatePerSec), so a spamming client cannot
+   * flood the room.
+   */
+  sendChat(player, text) {
+    const clean = String(text ?? '').trim().slice(0, this.cfg.chatMaxLen);
+    if (!clean) return;
+    const inRound = WORLD_PHASES.has(this.phase) && this.phase !== PHASES.LOBBY;
+    const payload = {
+      id: player.id,
+      name: player.name,
+      text: clean,
+      team: player.team,
+      channel: inRound ? player.team : 'lobby',
+    };
+    for (const p of this.players.values()) {
+      if (!p.connected) continue;
+      const visible = !inRound || p.team === player.team;
+      if (visible) p.send(EVENTS.CHAT_RECV, payload);
     }
   }
 

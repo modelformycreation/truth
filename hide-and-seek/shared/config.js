@@ -42,6 +42,7 @@ export const DEFAULT_CONFIG = {
   // ---- touch controls --------------------------------------------------------
   joystickDeadzone: 0.08,       // stick magnitude below this = standing still
   joystickSprintThreshold: 0.9, // stick pushed past this fraction of the rim = sprint
+  sprintLockHoldSec: 1,         // Feature 3: hold the joystick at the rim this long to LOCK sprint on
 
   // ---- audio / feedback ------------------------------------------------------
   footstepStrideWalkM: 1.6,     // metres travelled per walking footstep
@@ -66,6 +67,10 @@ export const DEFAULT_CONFIG = {
   boostDurationSec: 10,         // ⚡ any team: speed boost
   boostSpeedMult: 1.4,          //   (also lifts the anti-cheat speed cap)
   cloakDurationSec: 10,         // 🕶 hiders only: unrevealed + uncatchable
+
+  // ---- chat (Feature 5) ---------------------------------------------------------
+  chatMaxLen: 140,              // max chars per message (server-truncated)
+  chatRatePerSec: 4,            // per-player message rate limit (server-enforced)
 
   // ---- network ----------------------------------------------------------------
   snapshotHz: 15,               // server -> client state broadcast rate

@@ -42,6 +42,7 @@ export const EVENTS = {
   LOBBY_READY: 'lobby:ready',
   LOBBY_PREFERENCE: 'lobby:preference',
   LOBBY_SETTINGS: 'lobby:settings',
+  LOBBY_SET_MAP: 'lobby:setMap',
   LOBBY_ADD_BOT: 'lobby:addBot',
   LOBBY_REMOVE_BOT: 'lobby:removeBot',
   LOBBY_KICK: 'lobby:kick',
@@ -51,6 +52,10 @@ export const EVENTS = {
   VOICE_SIGNAL: 'voice:signal',
   VOICE_TALK: 'voice:talk',
   VOICE_MUTED: 'voice:muted',
+  CHAT_SEND: 'chat:send',
+  CHAT_RECV: 'chat:recv',
+  CONTROLS_GET: 'controls:get',
+  CONTROLS_SAVE: 'controls:save',
   TIME_SYNC: 'time:sync',
 
   // server -> client
@@ -71,6 +76,7 @@ export const EVENTS = {
   VOICE_SIGNAL: 'voice:signal',
   VOICE_TALK: 'voice:talk',
   VOICE_MUTED: 'voice:muted',
+  CHAT_RECV: 'chat:recv',
   TIME_SYNC_RESP: 'time:syncResp',
 };
 

@@ -10,6 +10,10 @@
 
 import { ANIM } from '../../shared/constants.js';
 import { circleBoxPush, supportHeight, cameraRelativeMove, facingYaw } from '../../shared/geometry.js';
+import {
+  createSprintState, stickTouchStart, stickMove, stickEnd as endStickState,
+  toggleSprint, releaseSprintInputs, sprinting as sprintingState,
+} from '../../shared/sprint.js';
 
 export class PlayerController {
   constructor(world, settings) {
@@ -30,10 +34,15 @@ export class PlayerController {
     this.onJump = null;
     this.onLand = null;
 
-    this.input = { x: 0, z: 0, sprint: false, jump: false, lookDx: 0, lookDy: 0 };
-    this.sprintHeld = false;   // sprint button physically held
-    this.sprintLock = false;   // sprint toggled on by a quick tap
-    this.stickSprint = false;  // joystick pushed to the rim
+    this.input = { x: 0, z: 0, jump: false, lookDx: 0, lookDy: 0 };
+    // ---- Feature 3: FREE FIRE-style LOCKED sprint. ----
+    // `sprintLock` is a persistent state (the GOLD indicator). It is turned on
+    // by holding the joystick at the rim for `sprintLockHoldSec`, or by tapping
+    // the 🏃 button. It stays on after the stick springs back to centre until
+    // it is cancelled by tapping 🏃 again or by the NEXT new joystick touch.
+    // The state machine lives in shared/sprint.js (pure + unit-tested).
+    this.sprint = createSprintState();
+    this.sprintMode = 'free-fire'; // Feature 6: 'free-fire' (locked) | 'classic' (hold)
     this._jumpLatched = false; // a tap shorter than one frame still jumps
     this._jumpHeld = false;
     this._sendAccum = 0;
@@ -101,14 +110,20 @@ export class PlayerController {
     let stickId = null, cx = 0, cy = 0, R = 56;
 
     const stickStart = (t) => {
+      // Feature 3: the NEXT new joystick touch after sprint is locked ON
+      // cancels the lock — that touch becomes normal walking. (The touch that
+      // ARMED the lock is the same touch and must NOT self-cancel; it already
+      // ended before this stickStart fires.)
+      stickTouchStart(this.sprint);
+      this._paintSprint?.();
       const r = base.getBoundingClientRect();
       // radius from the live layout (never trust a hard-coded constant)
       R = Math.max(24, Math.min(r.width, r.height) / 2);
       cx = r.left + r.width / 2; cy = r.top + r.height / 2;
       stickId = t.identifier;
-      stickMove(t);
+      handleStickMove(t);
     };
-    const stickMove = (t) => {
+    const handleStickMove = (t) => {
       let dx = t.clientX - cx, dy = t.clientY - cy;
       const d = Math.hypot(dx, dy);
       if (d > R) { dx = dx / d * R; dy = dy / d * R; }
@@ -117,13 +132,18 @@ export class PlayerController {
       this.input.z = dy / R;
       // push the stick to the rim to sprint (threshold is a config value)
       const edge = cfg().joystickSprintThreshold ?? 0.9;
-      this.stickSprint = (Math.min(d, R) / R) > edge;
+      const rim = (Math.min(d, R) / R) > edge;
+      // Feature 3: hold the stick at the rim for `sprintLockHoldSec` to LOCK
+      // sprint on (it persists after the stick springs back to centre).
+      const holdMs = (cfg().sprintLockHoldSec ?? 1) * 1000;
+      stickMove(this.sprint, rim, performance.now(), holdMs);
+      if (rim && this.sprint.lock) this._paintSprint?.();
     };
     const stickEnd = () => {
       stickId = null;
       nub.style.transform = 'translate(-50%, -50%)';
       this.input.x = 0; this.input.z = 0;
-      this.stickSprint = false;
+      endStickState(this.sprint);
     };
 
     joystickEl.addEventListener('touchstart', (e) => {
@@ -135,7 +155,7 @@ export class PlayerController {
     window.addEventListener('touchmove', (e) => {
       if (stickId === null) return;
       for (const t of e.changedTouches) {
-        if (t.identifier === stickId) { e.preventDefault(); stickMove(t); }
+        if (t.identifier === stickId) { e.preventDefault(); handleStickMove(t); }
       }
     }, { passive: false });
     const stickTouchEnd = (e) => {
@@ -192,25 +212,19 @@ export class PlayerController {
       el.addEventListener('mouseleave', () => { if (!touching) release(); });
     };
 
-    // SPRINT — hold to sprint, or tap (<250 ms) to lock it on until tapped again.
-    let sprintPressAt = 0;
+    // SPRINT (Feature 3): the 🏃 button is a TAP-TO-TOGGLE that flips the
+    // LOCKED sprint state (on <-> off). No hold-to-sprint on the button — the
+    // GOLD `sprint-on` state is the locked-sprint indicator. (Desktop sprint =
+    // holding Shift, handled in update().)
     const paintSprint = () => {
-      const on = this.sprintHeld || this.sprintLock;
+      const on = this.sprint.lock;
       sprintBtn.classList.toggle('sprint-on', on);
       sprintBtn.setAttribute('aria-pressed', String(!!on));
     };
     bindHold(sprintBtn, () => {
-      sprintPressAt = performance.now();
-      this.sprintHeld = true;
+      toggleSprint(this.sprint);            // tap toggles the locked state
       paintSprint();
-    }, () => {
-      const quick = performance.now() - sprintPressAt < 250;
-      this.sprintHeld = false;
-      // a quick tap toggles the lock; a real hold just ends
-      if (quick) this.sprintLock = !this.sprintLock;
-      else this.sprintLock = false;
-      paintSprint();
-    });
+    }, () => { /* release is a no-op: the lock persists */ });
 
     // JUMP — latched so a tap shorter than a frame still registers.
     bindHold(jumpBtn, () => {
@@ -230,9 +244,7 @@ export class PlayerController {
     this.input.x = 0; this.input.z = 0;
     this.input.jump = false;
     this.input.lookDx = 0; this.input.lookDy = 0;
-    this.sprintHeld = false;
-    this.sprintLock = false;
-    this.stickSprint = false;
+    releaseSprintInputs(this.sprint);
     this._jumpLatched = false;
     this._keys.clear();
     this._paintSprint?.();
@@ -273,10 +285,12 @@ export class PlayerController {
     if (this._keys.has('KeyA') || this._keys.has('ArrowLeft')) ix -= 1;
     if (this._keys.has('KeyD') || this._keys.has('ArrowRight')) ix += 1;
     const kbSprint = this._keys.has('ShiftLeft') || this._keys.has('ShiftRight');
-    // sprint from any source: Shift, the button (held or tap-locked), or the
-    // joystick pushed to its rim. Walking is simply "not sprinting".
-    const sprinting = kbSprint || this.input.sprint || this.sprintHeld ||
-      this.sprintLock || this.stickSprint;
+    // Feature 3: sprint from Shift (desktop hold) or the LOCKED sprint state,
+    // or while the joystick is currently pushed to its rim. Walking is simply
+    // "not sprinting". A locked sprint persists after the stick returns to
+    // centre until the next new joystick touch or another 🏃 tap.
+    const freeFire = this.sprintMode !== 'classic';
+    const sprinting = sprintingState(this.sprint, kbSprint, freeFire);
     // jump: held input, Space, or a latched tap from a previous frame
     const wantJump = this.input.jump || this._keys.has('Space') || this._jumpLatched;
     const mag = Math.hypot(ix, iz);
