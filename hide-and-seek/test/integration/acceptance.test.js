@@ -193,6 +193,11 @@ test('FULL ACCEPTANCE SCENARIO', async () => {
     const otherSeekerSocket = sockets[otherSeeker.name];
     bot.pos = [24.9, 0, 33];               // east of the reception shelf wall
     otherSeeker.pos = [22.9, 0, 33];       // west of it (1.6m away? -> 2.0m)
+    // Defense-in-depth: even though crates are disabled above, clear any live
+    // cloak/boost on the bot. A lingering 🕶 cloak would reject the catch with
+    // CLOAKED before the LOS rule is evaluated, failing this LOS-only check.
+    bot.cloakUntil = 0;
+    bot.boostUntil = 0;
     res = await emitAck(otherSeekerSocket, 'game:catch', { targetId: bot.id });
     assert.equal(res.ok, false);
     assert.equal(res.reason, 'NO_LINE_OF_SIGHT');
