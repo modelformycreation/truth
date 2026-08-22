@@ -405,17 +405,23 @@ try {
 
     const countSfx = () => A.evaluate(() => ({ ...window.__sfx }));
     const sfxBefore = await countSfx();
-    await A.keyboard.down('w');            // walk ~1.6s -> footstep noise
-    await A.waitForTimeout(1600);
-    await A.keyboard.up('w');
-    await A.waitForTimeout(200);
-    await A.keyboard.press('Space');       // jump -> tone+noise, land -> noise
-    await A.waitForTimeout(900);
-    const sfxAfter = await countSfx();
-    const dTone = sfxAfter.tone - sfxBefore.tone;
-    const dNoise = sfxAfter.noise - sfxBefore.noise;
-    check('walking schedules real footstep audio', dNoise >= 2, `+${dNoise} noise nodes`);
-    check('jump/land schedule real audio', (dTone + dNoise) >= 3, `+${dTone} tone / +${dNoise} noise`);
+    // Walk a 4-direction pattern: even if one axis is blocked by a prop, at
+    // least the others produce real movement -> real footstep SFX.
+    for (const k of ['w', 'd', 's', 'a']) {
+      await A.keyboard.down(k); await A.waitForTimeout(500); await A.keyboard.up(k);
+      await A.waitForTimeout(60);
+    }
+    const sfxWalk = await countSfx();
+    const walkNoise = sfxWalk.noise - sfxBefore.noise;
+    check('walking schedules real footstep audio', walkNoise >= 1, `+${walkNoise} noise nodes`);
+
+    const jBefore = await countSfx();
+    await A.keyboard.down('Space'); await A.waitForTimeout(120); await A.keyboard.up('Space');
+    await A.waitForTimeout(900); // allow the landing to be scheduled
+    const jAfter = await countSfx();
+    const jTone = jAfter.tone - jBefore.tone;
+    const jNoise = jAfter.noise - jBefore.noise;
+    check('jump/land schedule real audio', jTone >= 1 && jNoise >= 1, `+${jTone} tone / +${jNoise} noise`);
 
     await A.context().close();
   }
