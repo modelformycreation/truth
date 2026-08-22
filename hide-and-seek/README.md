@@ -9,9 +9,9 @@ checks), and a proper round loop (hide → hunt → catch → results).
 **100% browser-based** — nothing to install for players. Phones and desktops
 play together.
 
-| Hider hiding | Seeker FIND! | Results | Characters | The Old Docks |
+| Hider hiding | Seeker FIND! | Characters | The Old Docks | Mall of Shadows |
 |---|---|---|---|---|
-| ![](docs/screenshots/hider-prep.png) | ![](docs/screenshots/seeker-find.png) | ![](docs/screenshots/results.png) | ![](docs/screenshots/avatars-lineup.png) | ![](docs/screenshots/map-docks.png) |
+| ![](docs/screenshots/hider-prep.png) | ![](docs/screenshots/seeker-find.png) | ![](docs/screenshots/avatars-lineup.png) | ![](docs/screenshots/map-docks.png) | ![](docs/screenshots/map-mall.png) |
 
 ---
 
@@ -94,31 +94,54 @@ the lobby). All three are pure data in [`shared/map.js`](shared/map.js)
 *every* map).
 
 - **Blackwood Research Facility** (`facility`) — the original three-level
-  indoor maze: reception atrium, laboratory, server room, security, offices +
-  meeting room, storage, warehouse, **two secret vents**, a **basement**
-  (Archives with a secret ladder back up) and a **rooftop** (exterior service
-  stairs, AC plant, water tanks, maintenance shed). **210 hiding nooks.**
-- **The Old Docks** (`docks`) — a single-floor industrial yard: a **container
-  yard** (tall shipping containers + diagonal alleys), a central **warehouse**
-  (four open bays, rack aisles, forklift, barrels), and a **pier** (sheds,
-  crate stacks, barrel clusters). Rust/teal palette, open and windy.
-  **81 hiding nooks.**
-- **Mall of Shadows** (`mall`) — a single-floor abandoned arcade: perimeter
-  **shops** (display racks), a central **atrium** (fountain, planters), a
-  **food court** (table clusters), a neon **arcade row**, and a raised **DJ
-  stage** (tall booth, reached by walkable steps). **64 hiding nooks.**
+  indoor maze, **cold blue-white lighting**: reception atrium, laboratory,
+  server room, security, offices + meeting room, storage, warehouse,
+  **two secret vents**, a **basement** (Archives with a secret ladder back
+  up) and a **rooftop** (exterior service stairs, AC plant, water tanks,
+  maintenance shed). **209 hiding nooks.**
+- **The Old Docks** (`docks`) — a single-floor industrial yard under **warm
+  amber sodium lamps on a night sky**: a **container yard** (four-colour
+  containers + a yellow gantry-crane landmark), a central **warehouse**
+  (four open bays, rack aisles, forklift) and a **pier** (sheds, crates,
+  barrels). **89 hiding nooks.**
+- **Mall of Shadows** (`mall`) — a single-floor abandoned arcade bathed in
+  **neon magenta + cyan**: perimeter **shops** with lit shopfronts, a central
+  **atrium** (fountain, planters), a **food court**, a multicolour **arcade
+  row**, and a raised **DJ stage**. **64 hiding nooks.**
 
+Each map carries its own **scene identity** (sky, fog, key/fill lighting) so
+the three maps feel like three different places, not one room repainted.
 Every map: glowing **signage** + minimap labels (decorative — never block
 movement or line of sight); tall props (≥1.3 m) block line of sight, low
 props block movement only; **no hide spot lands within 7 m of a seeker spawn**
-(fairness rule, config `hideSpotMinSeekerDistance`).
+(fairness rule, config `hideSpotMinSeekerDistance`), and `verify:map` now
+also proves **every walkable cell has floor under it** (this caught a real
+hole in the facility's north atrium where players could fall out of the world
+and practice bots "hid" standing in mid-air).
+
+### 📦 Supply crates (server-authoritative loot)
+
+Every hunt drops **4 crates** at random validated spots:
+- **⚡ Boost crate** (gold) — walk into it: +40 % move speed for 10 s. The
+  anti-cheat speed cap is raised *server-side* for the same window, so it's a
+  genuine advantage, not a client trick.
+- **🕶 Cloak crate** (cyan) — **hidden hiders only**: for 10 s the hider is
+  *invisible to enemies and uncatchable* (the server omits them from enemy
+  snapshots and rejects catches with `CLOAKED`). Teammates can still see them.
+
+Crates appear in the world as glowing spinning crates; pickup is a
+server-checked radius check; effects show as a HUD countdown chip plus a
+glow on the avatar (gold boost / cyan cloak).
 
 ## 🎭 Characters & feel
 
-Every player gets a **Free Fire-style stylized character**: a low-poly
-humanoid with a per-player *deterministic* look (skin tone, hair style +
-colour, hat, tee/hoodie/jacket, pants, boots, backpack, glasses) — seeded
-from the player id so **every client renders the same player identically**.
+Every player gets a **Free Fire-style stylized character**: a smooth
+low-poly humanoid (no more Minecraft cubes) with a per-player *deterministic*
+look — **painted face** (eyes, brows, nose, mouth on a canvas texture),
+skin tone, hair style + colour, hat, tee/hoodie/jacket (zipper, collar,
+hood, pocket, cuffs, hem), pants, boots, backpack, glasses — seeded from the
+player id so **every client renders the same player identically**. Materials
+use PBR-style shading (per-surface roughness) under each map's lighting.
 Team cues are built in: green armband for hiders, orange armband + goggles
 for seekers.
 
@@ -217,7 +240,7 @@ reveal radius, movement speeds, voice, tick rates, anti-cheat tolerances…).
 ## 🧪 Testing
 
 ```bash
-npm test            # 174 tests: unit (movement math, camera look convention,
+npm test            # 184 tests: unit (movement math, camera look convention,
                     #   kick permissions, voice state, phase machine, remote
                     #   interpolation, map) + full acceptance scenario (spec §38)
 npm run verify:map  # map connectivity + spawns + hide spots for EVERY map
@@ -278,6 +301,29 @@ config) is engine-agnostic and maps 1:1 to a Unity/Fusion port if you later
 want native apps. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## 📜 Changelog
+
+### 2026-08-22 (3) — floor-hole fix, map identities, painted faces, supply crates
+- **Fixed a real floor hole (found via playtest + new verifier):** the
+  facility's north atrium strip (z 25..31) had no floor slab — players could
+  fall out of the world and practice bots "hid" standing in mid-air (23 hide
+  spots there). `verify:map` now proves **every walkable cell has floor under
+  it** and `computeHideSpots` refuses spots without support, so this class of
+  bug is structurally prevented.
+- **Each map is now its own "world":** per-map sky/fog/lighting (facility =
+  cold blue-white, docks = amber sodium night, mall = neon magenta/cyan),
+  docks gained a yellow gantry crane + four-colour containers, the mall
+  gained lit neon shopfronts + multicolour arcade row.
+- **Characters got painted faces** (canvas-textured eyes/brows/nose/mouth,
+  high-contrast so they read at play distance) + PBR-style materials
+  (per-surface roughness). Fixed the beanie band covering the face like a
+  ninja mask; shortened the jacket zipper.
+- **Supply crates (Free Fire-style loot, server-authoritative):** every hunt
+  drops 4 crates — ⚡ **boost** (+40 % speed, 10 s, server raises the
+  anti-cheat cap to match) and 🕶 **cloak** (hiders only: invisible to
+  enemies + uncatchable, 10 s; `CLOAKED` catch rejection, snapshot
+  filtering). Glowing crates in-world, HUD countdown chip, avatar glow.
+- **Tests:** 174 → **184** (10 new item tests: spawn/pickup/boost-cap/cloak
+  catch + visibility/DTO).
 
 ### 2026-08-22 (2) — three maps, host map picker, proven audio, 100-agent panel
 - **Two new maps + a host map picker.** The host now chooses the map when
