@@ -17,7 +17,7 @@ To use them:
     npm start &                # server on :8080
     node tools/browser-smoke.mjs
     node tools/browser-e2e.mjs
-    node tools/browser-matrix.mjs      # the strict-tester suite (106 checks)
+    node tools/browser-matrix.mjs      # the strict-tester suite (129 checks)
     node tools/map-screenshots.mjs     # one in-world shot per map
     node tools/browser-screenshots.mjs # the README screenshots
     node tools/playtest-panel.mjs      # 100-persona playtest + 99/100 gate

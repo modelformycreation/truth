@@ -55,7 +55,7 @@ browser tab (or your phone) and join with the room code for a real opponent.
 | Speaker mute (deafen) | 🔇 button in HUD **and** lobby | `N` or the button |
 | Chat | 💬 button in HUD + lobby panel (quick messages) | `Enter` in chat box |
 | Per-player volume | lobby voice panel (slider per player) | lobby voice panel |
-| **Custom controls** | lobby → **🕹 CONTROLS** (drag buttons anywhere, size/side of joystick, sprint mode) | same |
+| **Custom controls** | 🕹 CONTROLS in the lobby **and** in-game (drag buttons anywhere, size/side of joystick, sprint mode) | same |
 
 The camera is a normal (non-inverted) third-person orbit: dragging the mouse
 **down** looks **down**, dragging **right** rotates the view right. This was a
@@ -271,7 +271,7 @@ reveal radius, movement speeds, voice, tick rates, anti-cheat tolerances…).
 ## 🧪 Testing
 
 ```bash
-npm test            # 214 tests: unit (movement math, camera look convention,
+npm test            # 219 tests: unit (movement math, camera look convention,
                     #   kick permissions, voice state + toggle, sprint state
                     #   machine, TURN creds, chat team-split, controls
                     #   persistence, phase machine, remote interpolation, map)
@@ -431,6 +431,27 @@ want native apps. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## 📜 Changelog
 
+### 2026-08-22 (5) — in-game controls, host map change, chat clearing, graphics + perf
+- **Change the MAP from the lobby.** The host can switch maps before a round
+  (server-validated, host-only, LOBBY-only); the next round builds on the new
+  map for everyone. Non-hosts don't see the picker.
+- **CONTROLS are now reachable in-game** (🕹 button in the HUD top bar), not
+  just the lobby, so players can tweak their layout mid-match.
+- **Fixed the controls drag sometimes not moving** — `setPointerCapture`
+  retargeted pointer events to the button so the window move handler never
+  fired; removed it so the drag tracks even off the element.
+- **Chat is cleared when a round starts and when you return to the lobby**, so
+  last round's messages don't linger.
+- **HUD top bar wraps** onto a second row on narrow phones (no control is ever
+  clipped off-screen) and **modals scroll** when taller than the viewport
+  (top no longer hidden on short screens).
+- **Graphics & performance:** ACESFilmic tone mapping + sRGB output for richer,
+  more cinematic lighting, and an **FPS quality auto-tuner** that drops the
+  renderer pixel ratio under load (the playtest panel's #1 requested upgrade)
+  so the game keeps running smoothly instead of glitching.
+- **Tests:** 214 → **219** (5 map-change tests). Browser matrix 123 → **129**
+  checks incl. the new UX batch. Playtest panel: **100/100, gate passed.**
+
 ### 2026-08-22 (4) — cross-network voice (TURN), mic button, locked sprint, chat, custom controls
 - **Feature 1 — Cross-network voice via TURN (the #1 priority).** Voice worked
   on the same network but failed across different home networks. The server now
@@ -473,7 +494,8 @@ want native apps. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   `test/unit/controls.test.js`.
 - **Tests:** 184 → **214** unit/integration (minimap arrow, mic toggle, sprint
   state machine, TURN creds, chat server + client, controls). Browser matrix
-  now 123 checks incl. chat, controls, and voice status. Zero console errors.
+  now 129 checks incl. chat, controls, voice status, in-game controls, host map
+  change, and chat clearing. Zero console errors.
   Playtest panel: **100/100, gate passed.**
 
 ### 2026-08-22 (3) — floor-hole fix, map identities, painted faces, supply crates
