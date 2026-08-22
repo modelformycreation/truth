@@ -406,15 +406,26 @@ try {
 
     const countSfx = () => A.evaluate(() => ({ ...window.__sfx }));
     const sfxBefore = await countSfx();
-    // Walk a 4-direction pattern: even if one axis is blocked by a prop, at
-    // least the others produce real movement -> real footstep SFX.
+    // Park on the open atrium first so no direction is wall-blocked, then walk
+    // a 4-direction pattern. Each direction runs ~1s so even a slow headless
+    // update loop accumulates a full stride (footstepStrideWalkM = 1.6 m).
+    await putAt(A, 31.5, 0, 33.5);
+    await sleep(800); // let the server correction land
+    await A.evaluate(() => { window.__debug.controller.camYaw = Math.PI; });
+    const wp0 = await posOf(A);
     for (const k of ['w', 'd', 's', 'a']) {
-      await A.keyboard.down(k); await A.waitForTimeout(500); await A.keyboard.up(k);
-      await A.waitForTimeout(60);
+      await A.keyboard.down(k); await A.waitForTimeout(1000); await A.keyboard.up(k);
+      await A.waitForTimeout(120);
     }
+    const wp1 = await posOf(A);
     const sfxWalk = await countSfx();
     const walkNoise = sfxWalk.noise - sfxBefore.noise;
-    check('walking schedules real footstep audio', walkNoise >= 1, `+${walkNoise} noise nodes`);
+    // Footstep SFX is driven by the client's own predicted speed, so it is the
+    // reliable signal here. (Displacement can read small because the server's
+    // anti-cheat snaps the authoritative position back after the putAt settle,
+    // which does not affect locally-scheduled footsteps.)
+    const moved = Math.hypot(wp1[0] - wp0[0], wp1[2] - wp0[2]);
+    check('walking schedules real footstep audio', walkNoise >= 1, `+${walkNoise} noise (moved ${moved.toFixed(2)}m)`);
 
     const jBefore = await countSfx();
     // a jump only fires from the ground. Park the character on known flat
@@ -768,11 +779,19 @@ try {
     };
     let connected = await V1.waitForFunction(iceConnected, null, { timeout: 25000 }).then(() => true).catch(() => false);
     if (!connected) {
-      // Under heavy headless CPU contention the initial offer can stall. Force a
-      // fresh channel rejoin on both ends (rebuilds the peer set + re-offers),
-      // then give it a second window — a single legitimate retry.
-      await V1.evaluate(() => window.__debug.voice._rejoin());
-      await V2.evaluate(() => window.__debug.voice._rejoin());
+      // Under heavy headless CPU contention the initial negotiation can stall
+      // with peers stuck at cs=new (no offer ever flies). Force a FRESH peer
+      // set on both ends — tear down and rebuild the mesh, which re-creates the
+      // peer connections and re-triggers negotiation — then retry once.
+      const forceRejoin = (page) => page.evaluate(() => {
+        const v = window.__debug.voice;
+        const ch = v.channel;
+        v.provider.leave();
+        v.channel = ch;
+        v._rejoin();
+      });
+      await forceRejoin(V1);
+      await forceRejoin(V2);
       connected = await V1.waitForFunction(iceConnected, null, { timeout: 30000 }).then(() => true).catch(() => false);
     }
     // diagnostic on failure: dump the connection states we actually saw
