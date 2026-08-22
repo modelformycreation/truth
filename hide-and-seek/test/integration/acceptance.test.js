@@ -90,6 +90,12 @@ test('FULL ACCEPTANCE SCENARIO', async () => {
     const room = manager.rooms.get(code);
     assert.equal(room.players.size, 7);
 
+    // This scenario asserts the deterministic distance/LOS catch ladder, so the
+    // random supply crates must be OFF: a hider walking across a random hide
+    // spot can pick up a 🕶 cloak crate and become uncatchable ("CLOAKED"),
+    // which intermittently broke the "find everyone -> SEEKERS WIN" loop.
+    room.roomSettings.itemsEnabled = false;
+
     // -- invalid room code join is rejected ------------------------------------
     const stray = await connect(url);
     const bad = await emitAck(stray, 'room:join', { code: 'ZZZZZZ', name: 'Nope' });
