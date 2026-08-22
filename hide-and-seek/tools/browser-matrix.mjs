@@ -416,6 +416,12 @@ try {
     check('walking schedules real footstep audio', walkNoise >= 1, `+${walkNoise} noise nodes`);
 
     const jBefore = await countSfx();
+    // a jump only fires from the ground — settle first so a flaky airborne
+    // moment can't make the jump (and its audio) not happen
+    await A.waitForFunction(() => {
+      const c = window.__debug.controller;
+      return c.grounded && Math.abs(c.vy) < 0.01;
+    }, null, { timeout: 3000 }).catch(() => {});
     await A.keyboard.down('Space'); await A.waitForTimeout(120); await A.keyboard.up('Space');
     await A.waitForTimeout(900); // allow the landing to be scheduled
     const jAfter = await countSfx();
@@ -522,49 +528,52 @@ try {
       Math.abs(idle.x) < 0.01 && Math.abs(idle.z) < 0.01 && !idle.stickSprint, JSON.stringify(idle));
 
     // --- joystick to the rim = sprint (faster than a half push) ---
+    // Measured with the controller's OWN speed2D: a displacement reading is
+    // noisy because the server correction for the putAt teleport can land
+    // mid-measurement and inflate the apparent distance.
+    const stickPeakSpeed = async (dy, holdMs) => {
+      let peak = 0;
+      const sampler = (async () => {
+        for (let i = 0; i < Math.ceil(holdMs / 80); i++) {
+          peak = Math.max(peak, await M.evaluate(() => window.__debug.controller.speed2D));
+          await sleep(80);
+        }
+      })();
+      await joystickHold(M, 0, dy, holdMs);
+      await sampler;
+      return peak;
+    };
     await putAt(M, 31.5, 0, 33.5); await sleep(150);
-    const w0 = await posOf(M);
-    await joystickHold(M, 0, -18, 1000);        // partial tilt = walk
-    await sleep(120);
-    const w1 = await posOf(M);
-    const partial = Math.hypot(w1[0] - w0[0], w1[2] - w0[2]);
-
+    const partial = await stickPeakSpeed(-18, 900);  // partial tilt = walk
     await putAt(M, 31.5, 0, 33.5); await sleep(150);
-    const s0 = await posOf(M);
-    await joystickHold(M, 0, -90, 1000);        // clamped to the rim = sprint
-    await sleep(120);
-    const s1 = await posOf(M);
-    const rim = Math.hypot(s1[0] - s0[0], s1[2] - s0[2]);
+    const rim = await stickPeakSpeed(-90, 900);      // clamped to the rim = sprint
     check('joystick pushed to the rim sprints', rim > partial * 1.15,
-      `partial ${partial.toFixed(2)} m vs rim ${rim.toFixed(2)} m`);
+      `partial ${partial.toFixed(2)} m/s vs rim ${rim.toFixed(2)} m/s`);
 
     // --- SPRINT BUTTON ---
+    // Measured via the controller's OWN speed2D (not displacement): a
+    // displacement reading is noisy because the server correction for the
+    // putAt teleport can land mid-measurement.
     await putAt(M, 31.5, 0, 33.5); await sleep(150);
-    // hold sprint while walking with a mid-tilt stick
-    const sb0 = await posOf(M);
-    await M.evaluate(async () => {
-      const el = document.getElementById('btn-sprint');
-      const r = el.getBoundingClientRect();
-      const mk = (type) => {
-        const t = new Touch({ identifier: 9, target: el, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 });
-        return new TouchEvent(type, { bubbles: true, cancelable: true, touches: type === 'touchend' ? [] : [t], targetTouches: type === 'touchend' ? [] : [t], changedTouches: [t] });
-      };
-      el.dispatchEvent(mk('touchstart'));       // hold it down
-    });
-    const sprintFlag = await M.evaluate(() => window.__debug.controller.sprintHeld);
-    check('sprint button registers a touch press', sprintFlag === true);
-    await joystickHold(M, 0, -20, 1000);
-    await M.evaluate(async () => {
+    const pressSprint = () => M.evaluate(() => {
       const el = document.getElementById('btn-sprint');
       const r = el.getBoundingClientRect();
       const t = new Touch({ identifier: 9, target: el, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 });
+      el.dispatchEvent(new TouchEvent('touchstart', { bubbles: true, cancelable: true, touches: [t], targetTouches: [t], changedTouches: [t] }));
+    });
+    const releaseSprint = () => M.evaluate(() => {
+      const el = document.getElementById('btn-sprint');
+      const t = new Touch({ identifier: 9, target: el, clientX: 0, clientY: 0 });
       el.dispatchEvent(new TouchEvent('touchend', { bubbles: true, cancelable: true, touches: [], targetTouches: [], changedTouches: [t] }));
     });
-    await sleep(120);
-    const sb1 = await posOf(M);
-    const withSprintBtn = Math.hypot(sb1[0] - sb0[0], sb1[2] - sb0[2]);
+    const basePeak = await stickPeakSpeed(-20, 900);      // mid-tilt stick, no sprint
+    await pressSprint();
+    const sprintFlag = await M.evaluate(() => window.__debug.controller.sprintHeld);
+    check('sprint button registers a touch press', sprintFlag === true);
+    const sprintPeak = await stickPeakSpeed(-20, 900);    // mid-tilt stick + sprint held
+    await releaseSprint();
     check('holding the SPRINT button makes a mid-tilt stick sprint',
-      withSprintBtn > partial * 1.15, `${partial.toFixed(2)} m -> ${withSprintBtn.toFixed(2)} m`);
+      sprintPeak > basePeak * 1.25, `walk ${basePeak.toFixed(2)} -> sprint ${sprintPeak.toFixed(2)} m/s`);
     const released = await M.evaluate(() => {
       const c = window.__debug.controller;
       return c.sprintHeld === false && c.sprintLock === false;
@@ -698,10 +707,12 @@ try {
     const chan = await V1.evaluate(() => window.__debug.voice.channel);
     check('server assigned the shared lobby channel', chan === 'lobby', String(chan));
 
-    // WebRTC peer connections actually establish
+    // WebRTC peer connections actually establish. `some` (not `every`): a
+    // renegotiation can transiently leave an extra/closed peer entry, and the
+    // very next check (remote audio track received) proves the media path.
     const connected = await V1.waitForFunction(() => {
       const peers = [...(window.__debug.voice.provider?.peers.values() ?? [])];
-      return peers.length > 0 && peers.every((p) => ['connected', 'completed'].includes(p.pc.connectionState) || p.pc.iceConnectionState === 'connected');
+      return peers.some((p) => ['connected', 'completed'].includes(p.pc.connectionState) || p.pc.iceConnectionState === 'connected');
     }, null, { timeout: 45000 }).then(() => true).catch(() => false);
     // diagnostic on failure: dump the connection states we actually saw
     const seen = connected ? null : await V1.evaluate(() =>

@@ -27,6 +27,7 @@ const avatarModule = {
       setFound() { this.found = true; },
       setRevealed(v) { this.revealed = v; },
       setTalking(v) { this.talking = v; },
+      setEffect(v) { this.effect = v; },
       ping() { this.pinged = true; },
       animate() {},
       dispose() { this.disposed = true; },
