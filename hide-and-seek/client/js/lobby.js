@@ -38,6 +38,7 @@ export class LobbyUI {
     this.isHost = false;
     this.onLeave = null;
     this._wire();
+    this._wireMapPicker();
   }
 
   _wire() {
@@ -292,7 +293,28 @@ export class LobbyUI {
     const panel = document.querySelector('.host-panel');
     panel.classList.toggle('disabled', !this.isHost);
     this._renderSettings(state.settings);
+    // host can switch the map from the lobby (before the round)
+    const mapSel = $('lobby-map-select');
+    const mapRow = mapSel?.closest('.map-pick-row');
+    if (mapRow) mapRow.classList.toggle('host-only', !this.isHost);
+    if (mapSel && mapSel.value !== state.mapId) mapSel.value = state.mapId;
     void ROOM_SETTINGS_SCHEMA;
+  }
+
+  /** Wire the host map picker once. */
+  _wireMapPicker() {
+    const mapSel = $('lobby-map-select');
+    if (!mapSel) return;
+    mapSel.addEventListener('change', () => {
+      this.audio.click();
+      const mapId = mapSel.value;
+      if (!mapId || mapId === this._lastMapId) return;
+      this._lastMapId = mapId;
+      this.net.request(EVENTS.LOBBY_SET_MAP, { mapId }).then((res) => {
+        if (!res?.ok) this._toast('Could not change the map', true);
+        else this._toast(`Map set to ${res.mapName || mapId}`);
+      });
+    });
   }
 
   _canStartHeuristic(state) {

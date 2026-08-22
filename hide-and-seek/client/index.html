@@ -78,6 +78,14 @@
         <div class="lobby-side">
           <div class="panel host-panel">
             <div class="panel-title">HOST SETTINGS <span class="crown">👑</span></div>
+            <div class="map-pick-row">
+              <label for="lobby-map-select" class="map-pick-lbl">MAP</label>
+              <select id="lobby-map-select" class="map-select">
+                <option value="facility">Blackwood Research Facility</option>
+                <option value="docks">The Old Docks</option>
+                <option value="mall">Mall of Shadows</option>
+              </select>
+            </div>
             <div id="host-settings" class="settings-grid"></div>
             <div class="bot-row">
               <button id="btn-add-bot" class="btn tiny">＋ BOT HIDER</button>
@@ -123,6 +131,7 @@
       <button id="btn-mute" class="hud-btn" aria-label="Mute incoming voice" aria-pressed="false" title="Speaker (incoming voice)">🔊</button>
       <button id="btn-minimap" class="hud-btn">🗺</button>
       <button id="btn-chat" class="hud-btn" aria-label="Chat">💬</button>
+      <button id="btn-controls-hud" class="hud-btn" aria-label="Custom controls" title="Custom controls">🕹</button>
       <button id="btn-settings" class="hud-btn">⚙️</button>
     </div>
 

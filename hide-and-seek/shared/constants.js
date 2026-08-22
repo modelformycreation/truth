@@ -42,6 +42,7 @@ export const EVENTS = {
   LOBBY_READY: 'lobby:ready',
   LOBBY_PREFERENCE: 'lobby:preference',
   LOBBY_SETTINGS: 'lobby:settings',
+  LOBBY_SET_MAP: 'lobby:setMap',
   LOBBY_ADD_BOT: 'lobby:addBot',
   LOBBY_REMOVE_BOT: 'lobby:removeBot',
   LOBBY_KICK: 'lobby:kick',

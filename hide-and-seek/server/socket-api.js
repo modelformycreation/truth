@@ -102,6 +102,11 @@ export function attachSocketAPI(io, manager, config = {}, log = () => {}, extra 
       if (res?.error) fail('SETTINGS', res.error);
       ack?.({ ok: !res?.error, error: res?.error ?? null });
     }, 5));
+    socket.on(EVENTS.LOBBY_SET_MAP, needRoom(EVENTS.LOBBY_SET_MAP, ({ mapId } = {}, ack) => {
+      const res = ctx.room.setMap(ctx.player, mapId);
+      if (res?.error) fail('MAP', res.error);
+      ack?.({ ok: !res?.error, mapId: res?.mapId ?? null, mapName: res?.mapName ?? null, error: res?.error ?? null });
+    }, 5));
     socket.on(EVENTS.LOBBY_ADD_BOT, needRoom(EVENTS.LOBBY_ADD_BOT, () => {
       const res = ctx.room.addBot(ctx.player);
       if (res?.error) fail('BOT', res.error);
