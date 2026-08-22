@@ -22,6 +22,7 @@ export const CATCH_REJECT = {
   TOO_FAR: 'TOO_FAR',
   NO_LINE_OF_SIGHT: 'NO_LINE_OF_SIGHT',
   COOLDOWN: 'COOLDOWN',
+  CLOAKED: 'CLOAKED', // target is under a 🕶 cloak crate effect
 };
 
 /**
@@ -50,10 +51,16 @@ export function attemptCatch(room, seeker, targetId, now) {
   let named = null;
   for (const p of room.players.values()) {
     if (p.team !== TEAMS.HIDERS || p.status !== STATUS.HIDDEN) continue;
+    if (now < (p.cloakUntil ?? 0)) continue; // 🕶 cloaked: uncatchable
     allHidden.push(p);
     if (targetId && p.id === targetId) named = p;
   }
   if (targetId && !named) {
+    const t = room.players.get(targetId);
+    if (t && t.team === TEAMS.HIDERS && t.status === STATUS.HIDDEN &&
+        now < (t.cloakUntil ?? 0)) {
+      return { ok: false, reason: CATCH_REJECT.CLOAKED };
+    }
     return { ok: false, reason: CATCH_REJECT.NO_TARGET }; // unknown / already found / disconnected
   }
   const candidates = named ? [named] : allHidden;

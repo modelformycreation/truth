@@ -46,6 +46,10 @@ export class RemotePlayers {
       if (dto.s === STATUS.FOUND) entry.avatar.setFound();
       entry.avatar.setRevealed(!!dto.rv && dto.s === STATUS.HIDDEN);
       entry.avatar.setTalking(!!dto.tl);
+      // supply-crate effect glows (server timestamps; clockSkew aligns them)
+      const localNow = serverNow + clockSkew;
+      entry.avatar.setEffect(localNow < (dto.bf || 0) ? 'boost'
+        : localNow < (dto.cf || 0) ? 'cloak' : null);
 
       // footstep detection from real movement.
       // `clientNow` is in milliseconds, so the delta must be converted to

@@ -31,6 +31,8 @@ export class Player {
     this.foundAt = null;
     this.foundBy = null;         // player id or null (disconnect forfeit)
     this.catches = 0;
+    this.boostUntil = 0;         // epoch ms — ⚡ supply crate speed boost
+    this.cloakUntil = 0;         // epoch ms — 🕶 supply crate cloak (hiders)
 
     // voice
     this.talking = false;
@@ -80,6 +82,8 @@ export class Player {
       tl: this.talking,
       mu: this.muted,
       bot: this.isBot,
+      bf: this.boostUntil || 0,  // effect expiries (epoch ms) for HUD + glow
+      cf: this.cloakUntil || 0,
       ...extra,
     };
   }

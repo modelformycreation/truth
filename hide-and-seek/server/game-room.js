@@ -40,6 +40,7 @@ export class GameRoom {
     this.startedAt = 0;
     this.roundNumber = 0;
     this.lastResults = null;
+    this.items = [];               // supply crates for the current round
 
     this.voice = new VoiceManager(this);
     this._phaseTimer = null;
@@ -386,6 +387,7 @@ export class GameRoom {
 
     if (phase === PHASES.ACTIVE_ROUND) {
       this.broadcast(EVENTS.GAME_FEED, { text: 'READY OR NOT — seekers released!', kind: 'start' });
+      this._spawnItems();
     }
 
     if (phase === PHASES.LOBBY) {
@@ -517,6 +519,64 @@ export class GameRoom {
     }
   }
 
+  // ------------------------------------------------- supply crates (items) ---
+  /** Drop `itemCount` crates at valid hiding spots (all have floor under them).
+   *  Kinds alternate: ⚡ boost (any team) and 🕶 cloak (hidden hiders only). */
+  _spawnItems() {
+    this.items = [];
+    if (!this.cfg.itemsEnabled) return;
+    const spots = computeHideSpots(this.map);
+    if (!spots.length) return;
+    // pick `itemCount` distinct spots without replacement
+    const pool = spots.map((_, i) => i);
+    for (let i = pool.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [pool[i], pool[j]] = [pool[j], pool[i]];
+    }
+    const n = Math.min(this.cfg.itemCount ?? 4, pool.length);
+    for (let i = 0; i < n; i++) {
+      const s = spots[pool[i]];
+      this.items.push({
+        id: `it${i}`,
+        pos: [...s],
+        kind: i % 2 === 0 ? 'boost' : 'cloak',
+      });
+    }
+    this.broadcast(EVENTS.GAME_FEED, {
+      text: `📦 ${this.items.length} supply crates dropped — walk into them!`,
+      kind: 'item',
+    });
+  }
+
+  /** Called every tick during ACTIVE_ROUND: apply pickups, clear expiries. */
+  _updateItems(now) {
+    if (this.phase !== PHASES.ACTIVE_ROUND || !this.items.length) return;
+    const cfg = this.cfg;
+    const radius = cfg.itemPickupRadius ?? 1.2;
+    const r2 = radius * radius;
+    for (const p of this.players.values()) {
+      if (!p.connected && !p.isBot) continue;
+      if (p.status === STATUS.FOUND && p.team === TEAMS.HIDERS) continue; // found hiders don't loot
+      for (let i = this.items.length - 1; i >= 0; i--) {
+        const it = this.items[i];
+        const dx = p.pos[0] - it.pos[0], dz = p.pos[2] - it.pos[2];
+        if (dx * dx + dz * dz > r2) continue;
+        if (it.kind === 'boost') {
+          p.boostUntil = now + (cfg.boostDurationSec ?? 10) * 1000;
+          this.items.splice(i, 1);
+          this.broadcast(EVENTS.GAME_FEED, { text: `⚡ ${p.name} grabbed a speed boost!`, kind: 'item' });
+        } else if (it.kind === 'cloak') {
+          if (p.team === TEAMS.HIDERS && p.status === STATUS.HIDDEN) {
+            p.cloakUntil = now + (cfg.cloakDurationSec ?? 10) * 1000;
+            this.items.splice(i, 1);
+            this.broadcast(EVENTS.GAME_FEED, { text: `🕶 ${p.name} is cloaked!`, kind: 'item' });
+          }
+          // seekers/found hiders walking over a cloak crate do nothing
+        }
+      }
+    }
+  }
+
   // ------------------------------------------------------------ gameplay ---
 
   onMove(player, msg) {
@@ -567,17 +627,23 @@ export class GameRoom {
     if (this._disposed) return;
     if (!WORLD_PHASES.has(this.phase)) { this._stopTick(); return; }
     // safety: fire phase transitions even if a timeout was lost
-    if (this.phaseEndsAt && Date.now() > this.phaseEndsAt + 250) this._phaseExpired();
+    const now = Date.now();
+    if (this.phaseEndsAt && now > this.phaseEndsAt + 250) this._phaseExpired();
 
+    this._updateItems(now);
     const hiddenCount = this.hiddenHiders().length;
+    const items = this.phase === PHASES.ACTIVE_ROUND
+      ? this.items.map((i) => ({ i: i.id, p: i.pos, k: i.kind }))
+      : [];
     for (const viewer of this.players.values()) {
       if (!viewer.connected) continue;
       viewer.send(EVENTS.GAME_SNAPSHOT, {
-        t: Date.now(),
+        t: now,
         ph: this.phase,
         ea: this.phaseEndsAt,
         hc: hiddenCount,
         pl: buildWorldSnapshot(this, viewer),
+        it: items,
       });
     }
   }

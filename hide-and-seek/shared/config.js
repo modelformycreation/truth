@@ -59,6 +59,14 @@ export const DEFAULT_CONFIG = {
   scanPulseCooldownSec: 25,     // seeker scan pulse recharge
   scanPulseRadius: 18,          // metres — pings hiders inside this range
 
+  // ---- supply crates (picked up by walking into them, server-authoritative) --
+  itemsEnabled: true,
+  itemCount: 4,                 // crates dropped per round
+  itemPickupRadius: 1.2,        // metres
+  boostDurationSec: 10,         // ⚡ any team: speed boost
+  boostSpeedMult: 1.4,          //   (also lifts the anti-cheat speed cap)
+  cloakDurationSec: 10,         // 🕶 hiders only: unrevealed + uncatchable
+
   // ---- network ----------------------------------------------------------------
   snapshotHz: 15,               // server -> client state broadcast rate
   moveHz: 15,                   // client -> server movement rate

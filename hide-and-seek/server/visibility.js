@@ -17,7 +17,7 @@ import { dist3, hasLineOfSight } from '../shared/geometry.js';
 
 const FULL_VISIBILITY_PHASES = new Set([PHASES.TEAM_ASSIGNMENT, PHASES.ROUND_END, PHASES.RESULTS]);
 
-export function isVisible(viewer, target, room) {
+export function isVisible(viewer, target, room, now = Date.now()) {
   if (viewer.id === target.id) return true;
   if (FULL_VISIBILITY_PHASES.has(room.phase)) return true;
   if (target.team === viewer.team) return true;
@@ -25,6 +25,10 @@ export function isVisible(viewer, target, room) {
   // disconnected players show as markers for their team; enemies don't need them
   if (target.status === STATUS.DISCONNECTED) return false;
   if (target.status !== STATUS.HIDDEN && target.team !== TEAMS.SEEKERS) return false;
+
+  // 🕶 a cloaked hider is invisible to enemies (teammates already returned true
+  // above — the team can see its own cloaked member)
+  if (target.team === TEAMS.HIDERS && now < (target.cloakUntil ?? 0)) return false;
 
   // enemy: reveal only when close AND line of sight is clear
   const cfg = room.cfg;
@@ -46,10 +50,10 @@ export function eyePos(player, eyeHeight) {
 }
 
 /** Build the per-viewer filtered world snapshot (list of world DTOs). */
-export function buildWorldSnapshot(room, viewer) {
+export function buildWorldSnapshot(room, viewer, now = Date.now()) {
   const out = [];
   for (const p of room.players.values()) {
-    if (!isVisible(viewer, p, room)) continue;
+    if (!isVisible(viewer, p, room, now)) continue;
     const dto = p.toWorldDTO();
     if (p.status === STATUS.HIDDEN && p.team !== viewer.team &&
         !FULL_VISIBILITY_PHASES.has(room.phase)) {

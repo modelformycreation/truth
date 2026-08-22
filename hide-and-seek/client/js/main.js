@@ -8,6 +8,7 @@
 // ============================================================================
 
 import { createStore, EventBus, loadSettings, saveSettings, SETTING_DEFAULTS } from './state.js';
+import * as THREE from 'three';
 import { Net } from './net.js';
 import { AudioEngine } from './audio.js';
 import { HUD } from './hud.js';
@@ -44,6 +45,7 @@ const settings = { ...SETTING_DEFAULTS, ...loadSettings() };
 const store = createStore({
   selfId: null, session: null, roomState: null, phase: PHASES.LOBBY,
   myTeam: null, myStatus: null, serverSettings: null, roomCfg: null,
+  clockSkew: 0, // client perf.now() - server epoch, from latest snapshot
 });
 const bus = new EventBus();
 const net = new Net(bus);
@@ -148,6 +150,15 @@ function startLoop() {
       selfAvatar.setRot(controller.yaw);
       selfAvatar.animate(dt, controller.speed2D, controller.grounded, controller.vy);
 
+      // supply-crate effects: avatar glow + HUD countdown chip
+      const nowL = performance.now();
+      const skew = store.get().clockSkew;
+      const meDto = store.get().lastSnapshot?.pl?.find((p) => p.i === store.get().selfId);
+      const boostLeft = meDto ? Math.max(0, (meDto.bf || 0) + skew - nowL) : 0;
+      const cloakLeft = meDto ? Math.max(0, (meDto.cf || 0) + skew - nowL) : 0;
+      selfAvatar.setEffect(boostLeft > 0 ? 'boost' : cloakLeft > 0 ? 'cloak' : null);
+      updatePowerChip(boostLeft, cloakLeft);
+
       // audio listener + minimap + FIND-button reference position
       audio.setListener(controller.pos, controller.camYaw);
       audio.setHearRadius(cfg.footstepHearRadius ?? 22);
@@ -166,6 +177,7 @@ function startLoop() {
       updateDanger(cfg, snap);
     }
     remotes?.update(dt, now);
+    updateItemsAnim(dt);
     hud.update(now);
     updateScanButton(now);
     world.renderer.render(world.scene, world.camera);
@@ -211,6 +223,82 @@ function updateDanger(cfg, snap) {
   const t01 = 1 - nearest / radius;               // 0 at the edge, 1 on top of you
   dangerEl.style.opacity = String((t01 * 0.85).toFixed(3));
   audio.heartbeat(t01, cfg.heartbeatMinIntervalMs ?? 260, cfg.heartbeatMaxIntervalMs ?? 1300);
+}
+
+// ---------------- supply crates (items) ----------------
+// Glowing crates synced from the snapshot; walk into one to grab it.
+let itemsGroup = null;
+const itemMeshes = new Map();
+const CRATE_BODY_GEO = new THREE.BoxGeometry(1, 1, 1);
+const CRATE_LID_GEO = new THREE.BoxGeometry(1, 1, 1);
+
+function makeCrate(kind) {
+  const color = kind === 'cloak' ? 0x2ee8e8 : 0xffc46b;
+  const g = new THREE.Group();
+  const body = new THREE.Mesh(CRATE_BODY_GEO,
+    new THREE.MeshStandardMaterial({ color: 0x6a5a3a, roughness: 0.85 }));
+  body.scale.set(0.46, 0.4, 0.46);
+  body.position.y = 0.2;
+  const lid = new THREE.Mesh(CRATE_LID_GEO,
+    new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 0.75, roughness: 0.5 }));
+  lid.scale.set(0.5, 0.14, 0.5);
+  lid.position.y = 0.47;
+  const tag = new THREE.Mesh(CRATE_BODY_GEO,
+    new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.5 }));
+  tag.scale.set(0.3, 0.3, 0.47);
+  tag.position.y = 0.2;
+  g.add(body, lid, tag);
+  return g;
+}
+
+function syncItems(items) {
+  if (!world) return;
+  if (!itemsGroup) { itemsGroup = new THREE.Group(); world.scene.add(itemsGroup); }
+  const seen = new Set();
+  for (const it of items ?? []) {
+    seen.add(it.i);
+    let mesh = itemMeshes.get(it.i);
+    if (!mesh) {
+      mesh = makeCrate(it.k);
+      itemsGroup.add(mesh);
+      itemMeshes.set(it.i, mesh);
+    }
+    const x = it.p?.[0] ?? 0, y = it.p?.[1] ?? 0, z = it.p?.[2] ?? 0;
+    mesh.position.x += (x - mesh.position.x) * 0.5; // tiny lerp for smooth appear
+    mesh.position.y = y;
+    mesh.position.z += (z - mesh.position.z) * 0.5;
+  }
+  for (const [id, mesh] of itemMeshes) {
+    if (!seen.has(id)) {
+      itemsGroup.remove(mesh);
+      mesh.traverse((o) => { if (o.isMesh) { o.material.dispose(); } });
+      itemMeshes.delete(id);
+    }
+  }
+  if (!items?.length && itemsGroup) itemsGroup.visible = false;
+  else itemsGroup.visible = true;
+}
+
+function updateItemsAnim(dt) {
+  if (!itemsGroup || !itemsGroup.visible) return;
+  for (const mesh of itemMeshes.values()) {
+    mesh.rotation.y += dt * 0.8;
+    const t = performance.now() * 0.002;
+    mesh.position.y += Math.sin(t + mesh.id) * 0.0006; // gentle float
+  }
+}
+
+function updatePowerChip(boostMs, cloakMs) {
+  const el = $('power-chip');
+  if (boostMs > 0) {
+    el.textContent = `⚡ BOOST ${Math.ceil(boostMs / 1000)}s`;
+    el.className = 'hud-pill power-chip boost';
+  } else if (cloakMs > 0) {
+    el.textContent = `🕶 CLOAK ${Math.ceil(cloakMs / 1000)}s`;
+    el.className = 'hud-pill power-chip cloak';
+  } else if (!el.classList.contains('hidden')) {
+    el.className = 'hud-pill power-chip hidden';
+  }
 }
 
 function enterWorld() {
@@ -327,8 +415,9 @@ bus.on(`net:${EVENTS.GAME_PHASE}`, (msg) => {
 });
 
 bus.on(`net:${EVENTS.GAME_SNAPSHOT}`, (snap) => {
-  store.set({ lastSnapshot: snap });
+  store.set({ lastSnapshot: snap, clockSkew: performance.now() - (snap.t || Date.now()) });
   hud.onSnapshot(snap);
+  syncItems(snap.it);
   // One-time spawn sync: after a phase that re-positions us (gathering /
   // seeker vestibule), snap to the server's authoritative position. This
   // replaces the old hard-coded facility coordinates and works for any map.
