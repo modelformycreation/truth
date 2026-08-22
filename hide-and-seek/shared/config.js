@@ -39,6 +39,34 @@ export const DEFAULT_CONFIG = {
   eyeHeight: 1.5,               // LOS ray origin height above feet
   stepHeight: 0.36,             // auto step-up (stairs)
 
+  // ---- touch controls --------------------------------------------------------
+  joystickDeadzone: 0.08,       // stick magnitude below this = standing still
+  joystickSprintThreshold: 0.9, // stick pushed past this fraction of the rim = sprint
+
+  // ---- audio / feedback ------------------------------------------------------
+  footstepStrideWalkM: 1.6,     // metres travelled per walking footstep
+  footstepStrideRunM: 2.1,      // metres travelled per running footstep
+  footstepHearRadius: 22,       // metres — beyond this a step is inaudible
+  heartbeatRadius: 12,          // hiders hear a heartbeat when a seeker is closer
+  heartbeatMinIntervalMs: 260,  // fastest heartbeat (seeker right on top of you)
+  heartbeatMaxIntervalMs: 1300, // slowest heartbeat (at the edge of the radius)
+
+  // ---- map -------------------------------------------------------------------
+  hideSpotMinSeekerDistance: 7, // metres — bot hide spots this close to a seeker
+                                //          spawn are rejected as unfair
+
+  // ---- abilities -------------------------------------------------------------
+  scanPulseCooldownSec: 25,     // seeker scan pulse recharge
+  scanPulseRadius: 18,          // metres — pings hiders inside this range
+
+  // ---- supply crates (picked up by walking into them, server-authoritative) --
+  itemsEnabled: true,
+  itemCount: 4,                 // crates dropped per round
+  itemPickupRadius: 1.2,        // metres
+  boostDurationSec: 10,         // ⚡ any team: speed boost
+  boostSpeedMult: 1.4,          //   (also lifts the anti-cheat speed cap)
+  cloakDurationSec: 10,         // 🕶 hiders only: unrevealed + uncatchable
+
   // ---- network ----------------------------------------------------------------
   snapshotHz: 15,               // server -> client state broadcast rate
   moveHz: 15,                   // client -> server movement rate
@@ -46,7 +74,7 @@ export const DEFAULT_CONFIG = {
   // ---- features -----------------------------------------------------------------
   voiceEnabled: true,
   voiceLobbyShared: true,       // everyone shares one voice channel while in lobby
-  abilitiesEnabled: false,      // future mechanics toggle (hider/seeker abilities)
+  abilitiesEnabled: true,       // seeker scan pulse (see scanPulse* below)
   minimapShowTeammates: true,
   minimapShowFound: true,
 

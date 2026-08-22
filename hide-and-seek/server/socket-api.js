@@ -34,10 +34,10 @@ export function attachSocketAPI(io, manager, config = {}, log = () => {}) {
     socket.on(EVENTS.ROOM_LEAVE, () => { leaveRoom('left'); socket.emit(EVENTS.ROOM_LEFT, {}); });
 
     // ---- room lifecycle ------------------------------------------------------
-    socket.on(EVENTS.ROOM_CREATE, ({ name } = {}, ack) => {
+    socket.on(EVENTS.ROOM_CREATE, ({ name, mapId } = {}, ack) => {
       if (!allow('create', 2)) return ack?.({ ok: false, error: 'RATE' });
       const clean = cleanName(name);
-      const { room, error } = manager.create();
+      const { room, error } = manager.create({ mapId });
       if (error) return ack?.({ ok: false, error });
       if (ctx.room) leaveRoom('switch');
       const { player, error: joinErr } = room.addPlayer(clean, socket);
@@ -103,8 +103,15 @@ export function attachSocketAPI(io, manager, config = {}, log = () => {}) {
       const res = ctx.room.addBot(ctx.player);
       if (res?.error) fail('BOT', res.error);
     }, 2));
-    socket.on(EVENTS.LOBBY_REMOVE_BOT, needRoom(EVENTS.LOBBY_REMOVE_BOT, ({ botId } = {}) => {
-      ctx.room.removeBot(ctx.player, botId);
+    socket.on(EVENTS.LOBBY_REMOVE_BOT, needRoom(EVENTS.LOBBY_REMOVE_BOT, ({ botId } = {}, ack) => {
+      const res = ctx.room.removeBot(ctx.player, botId ?? null);
+      if (res?.error) fail('BOT', res.error);
+      ack?.({ ok: !res?.error, error: res?.error ?? null });
+    }, 5));
+    socket.on(EVENTS.LOBBY_KICK, needRoom(EVENTS.LOBBY_KICK, ({ playerId } = {}, ack) => {
+      const res = ctx.room.kick(ctx.player, String(playerId ?? ''));
+      if (res?.error) fail('KICK', res.error);
+      ack?.({ ok: !res?.error, error: res?.error ?? null });
     }, 5));
     socket.on(EVENTS.GAME_START, needRoom(EVENTS.GAME_START, (_, ack) => {
       ack?.(ctx.room.start(ctx.player));
@@ -125,9 +132,13 @@ export function attachSocketAPI(io, manager, config = {}, log = () => {}) {
     socket.on(EVENTS.TIME_SYNC, (_, ack) => ack?.({ t: Date.now() }));
 
     // ---- voice: server owns channels, relays signaling only within a channel ---
+    // ICE candidate exchange is bursty: a mesh peer can emit dozens of
+    // candidates in well under a second, and a dropped candidate silently
+    // breaks the connection. The payload is size-capped in relaySignal, so the
+    // budget here is generous on purpose.
     socket.on(EVENTS.VOICE_SIGNAL, needRoom(EVENTS.VOICE_SIGNAL, ({ to, data } = {}) => {
       ctx.room.voice.relaySignal(ctx.player, String(to ?? ''), data);
-    }, 60));
+    }, 400));
 
     socket.on(EVENTS.VOICE_TALK, needRoom(EVENTS.VOICE_TALK, ({ talking } = {}) => {
       if (ctx.room.cfg.voiceEnabled) ctx.room.voice.setTalking(ctx.player, !!talking);

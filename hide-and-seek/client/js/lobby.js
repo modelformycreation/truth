@@ -8,6 +8,12 @@ import { ROOM_SETTINGS_SCHEMA } from '../../shared/config.js';
 
 const $ = (id) => document.getElementById(id);
 
+// player names are user input — never interpolate them raw into innerHTML
+const escapeHtml = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => (
+  { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+));
+const escapeAttr = escapeHtml;
+
 const SETTING_DEFS = [
   { key: 'minPlayers', label: 'Min players', type: 'range', min: 2, max: 10, step: 1, fmt: (v) => v },
   { key: 'seekerRatio', label: 'Seekers', type: 'range', min: 0.2, max: 0.5, step: 0.05, fmt: (v) => `${Math.round(v * 100)}%` },
@@ -18,6 +24,7 @@ const SETTING_DEFS = [
   { key: 'requireLineOfSight', label: 'Line of sight', type: 'toggle' },
   { key: 'allowTeamPreference', label: 'Team preference', type: 'toggle' },
   { key: 'voiceEnabled', label: 'Voice chat', type: 'toggle' },
+  { key: 'abilitiesEnabled', label: 'Seeker scan pulse', type: 'toggle' },
   { key: 'minimapShowTeammates', label: 'Map: teammates', type: 'toggle' },
 ];
 
@@ -40,7 +47,8 @@ export class LobbyUI {
       this.audio.unlock(); this.audio.click();
       const name = this._saveName(nameInput);
       if (!name) return this._homeError('Enter a name first');
-      const res = await this.net.request(EVENTS.ROOM_CREATE, { name });
+      const mapId = $('select-map')?.value || 'facility';
+      const res = await this.net.request(EVENTS.ROOM_CREATE, { name, mapId });
       if (!res.ok) return this._homeError(res.message || res.error || 'Could not create room');
       this._rememberSession(res);
       this.store.set({ session: res });
@@ -91,6 +99,26 @@ export class LobbyUI {
     $('btn-add-bot').addEventListener('click', () => {
       this.audio.click();
       this.net.send(EVENTS.LOBBY_ADD_BOT, {});
+    });
+
+    $('btn-remove-bot').addEventListener('click', async () => {
+      this.audio.click();
+      const res = await this.net.request(EVENTS.LOBBY_REMOVE_BOT, {});
+      if (res?.error === 'NOT_BOT') this._toast('No bots to remove', true);
+    });
+
+    // Kick buttons are re-rendered constantly, so delegate from the list.
+    $('lobby-players').addEventListener('click', async (e) => {
+      const btn = e.target.closest('[data-kick]');
+      if (!btn) return;
+      this.audio.click();
+      const id = btn.dataset.kick;
+      const name = btn.dataset.name || 'this player';
+      const isBot = btn.dataset.bot === '1';
+      if (!isBot && !window.confirm(`Remove ${name} from the room?`)) return;
+      const res = await this.net.request(EVENTS.LOBBY_KICK, { playerId: id });
+      if (res?.ok) this._toast(`${name} removed`);
+      else this._toast(this._kickError(res), true);
     });
 
     $('btn-start').addEventListener('click', async () => {
@@ -151,6 +179,15 @@ export class LobbyUI {
     return 'Cannot start yet';
   }
 
+  _kickError(res) {
+    switch (res?.error) {
+      case 'NOT_HOST': return 'Only the host can remove players';
+      case 'CANNOT_KICK_HOST': return 'The host cannot be removed';
+      case 'NO_TARGET': return 'That player already left';
+      default: return 'Could not remove that player';
+    }
+  }
+
   _me() {
     const s = this.store.get();
     const myId = s.selfId;
@@ -192,12 +229,18 @@ export class LobbyUI {
     const list = $('lobby-players');
     list.innerHTML = state.players.map((p) => {
       const prefTag = p.pref !== 'any' ? `<span class="tag-pref">${p.pref === 'SEEKERS' ? 'seek' : 'hide'}</span>` : '';
+      // the host gets a remove button on every row except their own
+      const canKick = this.isHost && p.id !== myId;
+      const kickBtn = canKick
+        ? `<button class="btn tiny danger kick-btn" data-kick="${p.id}" data-name="${escapeAttr(p.name)}" data-bot="${p.bot ? '1' : '0'}" title="Remove ${escapeAttr(p.name)}" aria-label="Remove ${escapeAttr(p.name)}">✕</button>`
+        : '';
       return `<div class="player-row ${p.ready ? 'ready' : ''}">
-        <span class="p-name">${p.bot ? '🤖 ' : ''}${p.name}${p.host ? ' <span class="tag-host">👑</span>' : ''}</span>
+        <span class="p-name">${p.bot ? '🤖 ' : ''}${escapeHtml(p.name)}${p.host ? ' <span class="tag-host">👑</span>' : ''}</span>
         <span class="p-tags">
           ${prefTag}
           ${p.conn === false ? '<span style="color:#ff8d8d">reconnecting…</span>' : ''}
           <span class="${p.ready ? 'tag-ready' : ''}">${p.ready ? '✔ READY' : 'not ready'}</span>
+          ${kickBtn}
         </span>
       </div>`;
     }).join('');
@@ -266,7 +309,11 @@ export class LobbyUI {
       wrap.dataset.wired = '1';
     }
     for (const def of SETTING_DEFS) {
-      const el = wrap.querySelector(`[data-key="${def.key}"]`);
+      // NB: the row <div> *and* the control share data-key, so this must select
+      // the INPUT explicitly — a bare [data-key] selector matches the div first,
+      // which silently left every toggle unchecked and every slider parked at
+      // its default midpoint no matter what the room settings actually were.
+      const el = wrap.querySelector(`input[data-key="${def.key}"]`);
       if (!el) continue;
       const v = settings[def.key];
       if (def.type === 'toggle') el.checked = !!v;
@@ -294,14 +341,32 @@ export class LobbyUI {
     const permBtn = $('btn-voice-perm');
     if (!state.hasMic) {
       el.innerHTML = state.status === 'error'
-        ? `<span style="color:#ff9c9c">${state.errorMsg}</span>`
+        ? `<span style="color:#ff9c9c">${escapeHtml(state.errorMsg)}</span>`
         : 'Enable the mic to talk to your team (optional — you can always listen).';
       permBtn.classList.remove('hidden');
       permBtn.textContent = '🎤 ENABLE MICROPHONE';
     } else {
       permBtn.classList.add('hidden');
       const ch = state.channel === TEAMS.HIDERS ? '🟢 HIDER channel' : state.channel === TEAMS.SEEKERS ? '🟠 SEEKER channel' : state.channel === 'lobby' ? 'lobby (everyone)' : '—';
-      el.innerHTML = `Mic ready · ${ch}<br><span style="opacity:.7">${state.members.length} listening</span>`;
+      el.innerHTML = `Mic ready · ${ch}<br><span style="opacity:.7">${state.members.length} in channel</span>`;
+    }
+
+    // per-player volume sliders + live speaking indicators
+    const list = $('voice-members');
+    if (!list) return;
+    const others = (state.members ?? []).filter((m) => !m.self);
+    list.innerHTML = others.map((m) => `
+      <div class="vm-row ${m.talking && !m.muted ? 'talking' : ''}">
+        <span class="vm-dot"></span>
+        <span class="vm-name">${escapeHtml(m.name)}</span>
+        <input type="range" min="0" max="1" step="0.05" value="${m.volume ?? 1}" data-vol="${m.id}" aria-label="Volume for ${escapeAttr(m.name)}">
+      </div>`).join('') || '<span class="hint">No one else in your voice channel yet.</span>';
+    if (!list.dataset.wired) {
+      list.addEventListener('input', (e) => {
+        const id = e.target.dataset.vol;
+        if (id) this.voice.setPeerVolume(id, Number(e.target.value));
+      });
+      list.dataset.wired = '1';
     }
   }
 }

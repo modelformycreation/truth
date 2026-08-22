@@ -8,54 +8,92 @@
 import * as THREE from 'three';
 import { getMap } from '../../shared/map.js';
 
-export function buildWorld(canvas, quality = 'medium') {
-  const map = getMap('facility');
+const EMISSIVE = new Set(['light', 'sign']); // cosmetic: emissive, no collision, no LOS
+
+/** Build (and re-parent) the static map meshes + grid for `map` into the scene. */
+function buildMapGeometry(scene, map) {
+  const solid = new THREE.Group();
+  solid.add(mergeBoxes(map.boxes.filter((b) => !EMISSIVE.has(b.kind)), (b) => b.color));
+  scene.add(solid);
+
+  const lightsMesh = mergeBoxes(map.boxes.filter((b) => EMISSIVE.has(b.kind)), (b) => b.color ?? 0xfff2cc);
+  lightsMesh.material = new THREE.MeshBasicMaterial({ vertexColors: true });
+  scene.add(lightsMesh);
+
+  // subtle floor grid for motion parallax in big halls, centred on the map
+  const grid = new THREE.GridHelper(90, 90, 0x223048, 0x161d2c);
+  const b = map.bounds;
+  grid.position.set((b.minX + b.maxX) / 2, 0.02, (b.minZ + b.maxZ) / 2);
+  grid.material.transparent = true;
+  grid.material.opacity = 0.25;
+  scene.add(grid);
+
+  return { solid, lightsMesh, grid };
+}
+
+function disposeMapGeometry(scene, g) {
+  scene.remove(g.solid, g.lightsMesh, g.grid);
+  g.solid.traverse((o) => { if (o.isMesh) { o.geometry?.dispose(); o.material?.dispose?.(); } });
+  g.lightsMesh.geometry.dispose(); g.lightsMesh.material.dispose();
+  g.grid.geometry.dispose(); g.grid.material.dispose();
+}
+
+export function buildWorld(canvas, quality = 'medium', mapId = 'facility') {
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x0d1018);
-  scene.fog = new THREE.Fog(0x0d1018, 18, 78);
 
   const pixelRatio = quality === 'low' ? 1 : quality === 'high' ? Math.min(devicePixelRatio, 2) : Math.min(devicePixelRatio, 1.5);
-  const renderer = new THREE.WebGLRenderer({ canvas, antialias: quality === 'high', powerPreference: 'high-performance' });
+  // Antialias is always on: aliased silhouette edges are the main thing that
+  // makes the low-poly characters read as "blocky / Minecraft" on laptops.
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
   renderer.setPixelRatio(pixelRatio);
   renderer.setSize(innerWidth, innerHeight);
 
   const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.1, 220);
   camera.position.set(31, 3, 40);
 
-  // ---------------- lights ----------------
-  const hemi = new THREE.HemisphereLight(0x9db4d8, 0x2c313c, 0.9);
+  // ---------------- lights (recoloured per map) ----------------
+  const hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 1);
   scene.add(hemi);
-  const sun = new THREE.DirectionalLight(0xffe9c4, 0.75);
-  sun.position.set(40, 60, -30);
+  const sun = new THREE.DirectionalLight(0xffffff, 0.7);
   scene.add(sun);
-  const fill = new THREE.DirectionalLight(0x6a86c8, 0.28);
-  fill.position.set(-30, 40, 35);
+  const fill = new THREE.DirectionalLight(0xffffff, 0.3);
   scene.add(fill);
 
-  // ---------------- merged static geometry ----------------
-  const solid = new THREE.Group();
-  const solidBoxes = map.boxes.filter((b) => b.kind !== 'light');
-  const solidMesh = mergeBoxes(solidBoxes, (b) => b.color);
-  solid.add(solidMesh);
-  scene.add(solid);
+  /** Apply a map's scene identity: sky, fog, and lighting. */
+  function applyScene(m) {
+    const sc = m.scene ?? {};
+    scene.background = new THREE.Color(sc.bg ?? 0x0d1018);
+    const f = sc.fog ?? [0x0d1018, 18, 78];
+    scene.fog = new THREE.Fog(f[0], f[1], f[2]);
+    const h = sc.hemi ?? [0x9db4d8, 0x2c313c, 0.9];
+    hemi.color.setHex(h[0]); hemi.groundColor.setHex(h[1]); hemi.intensity = h[2];
+    const k = sc.key ?? [0xffe9c4, 0.75, [40, 60, -30]];
+    sun.color.setHex(k[0]); sun.intensity = k[1]; sun.position.set(k[2][0], k[2][1], k[2][2]);
+    const fl = sc.fill ?? [0x6a86c8, 0.28, [-30, 40, 35]];
+    fill.color.setHex(fl[0]); fill.intensity = fl[1]; fill.position.set(fl[2][0], fl[2][1], fl[2][2]);
+  }
 
-  const lightsMesh = mergeBoxes(map.boxes.filter((b) => b.kind === 'light'), () => 0xfff2cc);
-  const lightMat = new THREE.MeshBasicMaterial({ color: 0xfff2cc });
-  lightsMesh.material = lightMat;
-  scene.add(lightsMesh);
+  // ---------------- current map ----------------
+  let map = getMap(mapId);
+  let geo = buildMapGeometry(scene, map);
+  applyScene(map);
 
-  // subtle floor grid for motion parallax in big halls
-  const grid = new THREE.GridHelper(70, 70, 0x223048, 0x161d2c);
-  grid.position.set(33, 0.02, 24);
-  grid.material.transparent = true;
-  grid.material.opacity = 0.25;
-  scene.add(grid);
-
-  return {
-    scene, camera, renderer, map,
-    colliders: map.colliders,
-    ladders: map.ladders,
-    bounds: map.bounds,
+  const world = {
+    scene, camera, renderer,
+    get map() { return map; },
+    get colliders() { return map.colliders; },
+    get ladders() { return map.ladders; },
+    get bounds() { return map.bounds; },
+    /** Swap in a different map (same renderer/camera). The controller reads
+     *  world.colliders/ladders/bounds live, so it follows automatically. */
+    setMap(nextId) {
+      const next = getMap(nextId);
+      if (next === map) return;
+      disposeMapGeometry(scene, geo);
+      map = next;
+      geo = buildMapGeometry(scene, map);
+      applyScene(map);
+    },
     resize() {
       camera.aspect = innerWidth / innerHeight;
       camera.updateProjectionMatrix();
@@ -66,6 +104,7 @@ export function buildWorld(canvas, quality = 'medium') {
       renderer.setPixelRatio(pr);
     },
   };
+  return world;
 }
 
 /** Merge many axis-aligned colored boxes into a single BufferGeometry. */

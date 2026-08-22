@@ -41,7 +41,9 @@ export function validateMove(room, player, msg, now) {
   }
 
   const dt = Math.min(1, Math.max(0.05, (now - player.lastMoveAt) / 1000));
-  const maxH = cfg.sprintSpeed * cfg.speedTolerance * dt + 0.4;
+  // ⚡ boost crate legitimately raises the speed cap (server-owned expiry)
+  const boostMult = now < (player.boostUntil ?? 0) ? (cfg.boostSpeedMult ?? 1.4) : 1;
+  const maxH = cfg.sprintSpeed * boostMult * cfg.speedTolerance * dt + 0.4;
   const maxV = Math.max(cfg.jumpSpeed + 2, 20) * dt + 0.4;
 
   const nx = msg.p[0], ny = msg.p[1], nz = msg.p[2];

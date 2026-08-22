@@ -9,6 +9,10 @@ import { EVENTS, PHASES, TEAMS } from '../../shared/constants.js';
 
 const $ = (id) => document.getElementById(id);
 
+const escapeHtml = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => (
+  { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+));
+
 export class HUD {
   constructor(bus, net, audio, settingsStore) {
     this.bus = bus;
@@ -74,7 +78,7 @@ export class HUD {
     }
 
     if (phase === PHASES.PREPARATION) {
-      this.audio.roundStart();
+      this.audio.roundIntro();
       if (this.myTeam === TEAMS.SEEKERS) {
         this.el.blindfold.classList.remove('hidden');
       } else {
@@ -231,9 +235,20 @@ export class HUD {
 
   /** speaking indicators from voice channel members */
   onVoiceState(state) {
-    const talking = state.members.filter((m) => m.talking && !m.muted);
-    this.el.speakers.innerHTML = talking.map((m) =>
-      `<div class="speaker-chip talking">🎤 ${m.name}</div>`).join('');
+    // Show every member of our channel, not just the talkers, so players can
+    // see who is even connected to voice — the talking ones light up green.
+    const members = state.members ?? [];
+    if (members.length === 0) { this.el.speakers.innerHTML = ''; return; }
+    this.el.speakers.innerHTML = members.map((m) => {
+      const cls = [
+        'speaker-chip',
+        m.talking && !m.muted ? 'talking' : '',
+        m.muted ? 'muted' : '',
+      ].filter(Boolean).join(' ');
+      const icon = m.muted ? '🔇' : m.talking ? '🎤' : '🎧';
+      const name = m.self ? 'You' : m.name;
+      return `<div class="${cls}"><span class="dot"></span>${icon} ${escapeHtml(name)}</div>`;
+    }).join('');
   }
 
   toast(text, isErr = false) {

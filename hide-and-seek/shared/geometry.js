@@ -104,6 +104,42 @@ export function circleBoxPush(x, z, r, box) {
   return [x, box.max[2] + r];
 }
 
+/**
+ * Camera-relative movement basis.
+ *
+ * The third-person camera orbits the player and is placed at
+ *   camera = head + [sin(camYaw), *, cos(camYaw)] * distance
+ * so the unit vector pointing FROM the camera TOWARD the player — i.e. the
+ * direction the player walks when pressing "forward" — is the negation of it:
+ *
+ *   forward = (-sin(camYaw), -cos(camYaw))
+ *   right   = ( cos(camYaw), -sin(camYaw))     // forward x up, screen-right
+ *
+ * Input convention (matches both WASD and the virtual joystick):
+ *   iz = -1 → forward (W / stick up)      iz = +1 → back (S / stick down)
+ *   ix = -1 → left   (A / stick left)     ix = +1 → right (D / stick right)
+ *
+ * Hence world = (-iz) * forward + ix * right, which expands to the returned
+ * pair. Keeping this here (instead of inline in the controller) means the
+ * exact math the game runs is unit-testable without a browser.
+ *
+ * @returns {[number, number]} [worldX, worldZ] — same magnitude as (ix, iz).
+ */
+export function cameraRelativeMove(ix, iz, camYaw) {
+  const sin = Math.sin(camYaw), cos = Math.cos(camYaw);
+  const wx = ix * cos + iz * sin;
+  const wz = -ix * sin + iz * cos;
+  return [wx, wz];
+}
+
+/**
+ * Yaw a character should face while moving along (wx, wz).
+ * Avatars are modelled facing -Z at yaw 0, so forward = (-sin(yaw), -cos(yaw)).
+ */
+export function facingYaw(wx, wz) {
+  return Math.atan2(wx, wz) + Math.PI;
+}
+
 /** Is a point inside any of the boxes (2D footprint + y range)? */
 export function pointInAnyBox(x, y, z, boxes, pad = 0) {
   for (let i = 0; i < boxes.length; i++) {

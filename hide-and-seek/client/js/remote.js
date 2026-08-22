@@ -9,7 +9,11 @@ import * as THREE from 'three';
 import { createAvatar } from './avatar.js';
 import { STATUS, ANIM } from '../../shared/constants.js';
 
-const INTERP_DELAY = 0.12;
+// Interpolation delay, in MILLISECONDS — the buffer timestamps are
+// performance.now() values. This used to be `0.12`, i.e. 0.12 ms, which meant
+// remote players were never actually interpolated (they snapped to the newest
+// sample and jittered at the 15 Hz snapshot rate).
+const INTERP_DELAY_MS = 120;
 
 export class RemotePlayers {
   constructor(scene) {
@@ -42,12 +46,25 @@ export class RemotePlayers {
       if (dto.s === STATUS.FOUND) entry.avatar.setFound();
       entry.avatar.setRevealed(!!dto.rv && dto.s === STATUS.HIDDEN);
       entry.avatar.setTalking(!!dto.tl);
+      // supply-crate effect glows (server timestamps; clockSkew aligns them)
+      const localNow = serverNow + clockSkew;
+      entry.avatar.setEffect(localNow < (dto.bf || 0) ? 'boost'
+        : localNow < (dto.cf || 0) ? 'cloak' : null);
 
-      // footstep detection from real movement
-      const d = Math.hypot(dto.p[0] - entry.lastP[0], dto.p[2] - entry.lastP[2]);
-      const dt = Math.max(0.001, clientNow - entry.lastT);
-      const speed = d / dt;
-      if (speed > 0.5) this.onFootstep?.(dto.p, speed > 4.5);
+      // footstep detection from real movement.
+      // `clientNow` is in milliseconds, so the delta must be converted to
+      // seconds before comparing against m/s thresholds — the old code divided
+      // by milliseconds, making `speed` 1000x too small so REMOTE FOOTSTEPS
+      // NEVER PLAYED.
+      if (entry.lastT > 0) {
+        const d = Math.hypot(dto.p[0] - entry.lastP[0], dto.p[2] - entry.lastP[2]);
+        const dtSec = Math.max(0.001, (clientNow - entry.lastT) / 1000);
+        const speed = d / dtSec;
+        const grounded = dto.a !== ANIM.JUMP;
+        if (grounded && speed > 0.5) {
+          this.onFootstep?.(dto.p, speed > 4.5, dto.i, dto.t);
+        }
+      }
       entry.lastP = dto.p;
       entry.lastT = clientNow;
     }
@@ -60,7 +77,7 @@ export class RemotePlayers {
   }
 
   update(dt, now) {
-    const targetT = now - INTERP_DELAY;
+    const targetT = now - INTERP_DELAY_MS;
     for (const entry of this.map.values()) {
       const buf = entry.buffer;
       if (buf.length === 0) continue;

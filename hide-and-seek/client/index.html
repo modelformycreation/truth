@@ -24,6 +24,14 @@
       <div class="logo">BLACKWOOD</div>
       <div class="tagline">multiplayer hide &amp; seek — facility breach</div>
       <input id="input-name" maxlength="16" placeholder="Your name" autocomplete="off" />
+      <div class="map-pick">
+        <label for="select-map" class="map-pick-lbl">MAP (host picks)</label>
+        <select id="select-map" class="map-select">
+          <option value="facility">Blackwood Research Facility</option>
+          <option value="docks">The Old Docks</option>
+          <option value="mall">Mall of Shadows</option>
+        </select>
+      </div>
       <button id="btn-create" class="btn primary big">CREATE ROOM</button>
       <div class="join-row">
         <input id="input-code" maxlength="6" placeholder="ROOM CODE" autocomplete="off" autocapitalize="characters" />
@@ -31,7 +39,7 @@
       </div>
       <button id="btn-rejoin" class="btn subtle hidden">↩ REJOIN ROOM <span id="rejoin-code"></span></button>
       <div id="home-error" class="error"></div>
-      <div class="home-foot">mobile · headphones recommended · mic optional</div>
+      <div class="home-foot">mobile · headphones recommended · mic optional · build <span id="build-tag">…</span></div>
     </div>
   </div>
 
@@ -69,13 +77,19 @@
             <div id="host-settings" class="settings-grid"></div>
             <div class="bot-row">
               <button id="btn-add-bot" class="btn tiny">＋ BOT HIDER</button>
+              <button id="btn-remove-bot" class="btn tiny danger">－ REMOVE BOT</button>
             </div>
-            <div class="hint">Bots stand still once hidden — practice dummies for FIND.</div>
+            <div class="hint">Bots stand still once hidden — practice dummies for FIND.<br>Host tip: tap ✕ on any player row to remove them.</div>
           </div>
           <div class="panel voice-panel">
             <div class="panel-title">🎤 VOICE</div>
             <div id="voice-status" class="hint">Team voice activates when the round starts.</div>
+            <div class="voice-panel-row">
+              <button id="btn-mic-toggle-lobby" class="btn tiny" aria-pressed="false">🚫 MIC OFF</button>
+              <button id="btn-mute-lobby" class="btn tiny" aria-pressed="false">🔊 SOUND ON</button>
+            </div>
             <button id="btn-voice-perm" class="btn tiny">ENABLE MICROPHONE</button>
+            <div id="voice-members" class="voice-members"></div>
           </div>
         </div>
       </div>
@@ -88,7 +102,10 @@
       <div class="hud-pill" id="pill-team">—</div>
       <div class="hud-pill timer" id="pill-timer">00:00</div>
       <div class="hud-pill" id="pill-hidden">HIDDEN —</div>
+      <div class="hud-pill power-chip hidden" id="power-chip"></div>
       <div class="hud-flex"></div>
+      <button id="btn-mic-toggle" class="hud-btn" aria-label="Microphone on/off" aria-pressed="false" title="Microphone on/off">🎙️</button>
+      <button id="btn-mute" class="hud-btn" aria-label="Mute incoming voice" aria-pressed="false" title="Speaker (incoming voice)">🔊</button>
       <button id="btn-minimap" class="hud-btn">🗺</button>
       <button id="btn-settings" class="hud-btn">⚙️</button>
     </div>
@@ -102,14 +119,14 @@
 
     <div id="speakers" class="speakers"></div>
 
-    <!-- touch controls -->
-    <div id="joystick" class="joystick hidden">
+    <!-- touch controls (shown on touch devices — see .touch-ui in style.css) -->
+    <div id="joystick" class="joystick">
       <div class="stick-base"><div class="stick-nub"></div></div>
     </div>
     <div id="look-zone"></div>
     <div class="action-cluster">
-      <button id="btn-sprint" class="btn round">🏃</button>
-      <button id="btn-jump" class="btn round">⬆</button>
+      <button id="btn-sprint" class="btn round" aria-label="Sprint" aria-pressed="false">🏃</button>
+      <button id="btn-jump" class="btn round" aria-label="Jump">⬆</button>
     </div>
 
     <button id="btn-find" class="find-btn" disabled>
@@ -118,9 +135,17 @@
     </button>
 
     <div class="voice-cluster">
-      <button id="btn-mic" class="btn round mic">🎤</button>
-      <button id="btn-mute" class="btn round small">🔊</button>
+      <button id="btn-mic" class="btn round mic" aria-label="Hold to talk">
+        <span class="mic-icon">🎤</span>
+        <span class="mic-tag">TALK</span>
+      </button>
     </div>
+
+    <button id="btn-scan" class="scan-btn hidden" aria-label="Scan pulse">
+      <span class="scan-icon">📡</span>
+      <span class="scan-label">SCAN</span>
+      <span class="scan-cd"></span>
+    </button>
 
     <div id="center-banner" class="center-banner hidden"></div>
     <div id="blindfold" class="blindfold hidden">
@@ -158,6 +183,8 @@
   </div>
 
   <div id="conn-banner" class="conn-banner hidden">⚠ Connection lost — reconnecting…</div>
+  <div id="danger-vignette"></div>
+  <div id="scan-ripple"></div>
   <div id="toast-area"></div>
 
   <script type="module" src="./js/main.js"></script>

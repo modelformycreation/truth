@@ -8,6 +8,7 @@
 // ============================================================================
 
 import { createStore, EventBus, loadSettings, saveSettings, SETTING_DEFAULTS } from './state.js';
+import * as THREE from 'three';
 import { Net } from './net.js';
 import { AudioEngine } from './audio.js';
 import { HUD } from './hud.js';
@@ -23,11 +24,28 @@ import { EVENTS, PHASES, TEAMS, STATUS } from '../../shared/constants.js';
 const $ = (id) => document.getElementById(id);
 const WORLD_PHASES = new Set([PHASES.TEAM_ASSIGNMENT, PHASES.PREPARATION, PHASES.ACTIVE_ROUND, PHASES.ROUND_END, PHASES.RESULTS]);
 
+// Build tag: shown on the home screen so players (and testers) can tell which
+// code they are actually running — an open tab keeps running the old build
+// until it is reloaded, and this is the fastest way to notice that.
+const BUILD = 'ff-2026-08-22b';
+console.log(`[BLACKWOOD] client build ${BUILD}`);
+$('build-tag').textContent = BUILD;
+
+// ---------------- touch capability ----------------
+// A media query alone lies on hybrid laptops and in some emulators; combine it
+// with the real touch-point count and mark <body> so CSS + input agree.
+const IS_TOUCH = (navigator.maxTouchPoints ?? 0) > 0 ||
+  'ontouchstart' in window ||
+  window.matchMedia?.('(pointer: coarse)').matches === true;
+if (IS_TOUCH) document.body.classList.add('touch-ui');
+
+
 // ---------------- singletons ----------------
 const settings = { ...SETTING_DEFAULTS, ...loadSettings() };
 const store = createStore({
   selfId: null, session: null, roomState: null, phase: PHASES.LOBBY,
   myTeam: null, myStatus: null, serverSettings: null, roomCfg: null,
+  clockSkew: 0, // client perf.now() - server epoch, from latest snapshot
 });
 const bus = new EventBus();
 const net = new Net(bus);
@@ -37,6 +55,7 @@ const lobby = new LobbyUI(net, store, audio, voice);
 const hud = new HUD(bus, net, audio, store);
 
 let world = null;          // three.js context (created on first world phase)
+let worldMapId = null;     // which map the current world was built for
 let controller = null;     // our character
 let selfAvatar = null;     // our visual body
 let remotes = null;        // other players
@@ -44,6 +63,7 @@ let minimap = null;
 let rafId = null;
 let lastFrame = performance.now();
 let fpsCounter = { frames: 0, t: 0, value: 0 };
+let spawnSyncNeeded = false; // snap to the server spawn on the next snapshot
 
 // ---------------- helpers ----------------
 function toast(text, err) { hud.toast(text, err); }
@@ -63,20 +83,38 @@ function controllerSettings() {
 
 // ---------------- world lifecycle ----------------
 function ensureWorld() {
-  if (world) return;
+  const mapId = store.get().roomState?.mapId || 'facility';
+  if (world) {
+    // Same renderer/camera/controller — but if the room's map differs from the
+    // one built (player moved between rooms of different maps), swap the
+    // geometry and rebuild the map-dependent pieces.
+    if (worldMapId !== mapId) {
+      world.setMap(mapId);
+      worldMapId = mapId;
+      remotes.clear();
+      if (selfAvatar?.group.parent) world.scene.remove(selfAvatar.group);
+      minimap = new Minimap($('minimap'), world.map);
+    }
+    return;
+  }
   const canvas = $('game-canvas');
-  world = buildWorld(canvas, settings.quality);
+  world = buildWorld(canvas, settings.quality, mapId);
+  worldMapId = mapId;
   remotes = new RemotePlayers(world.scene);
-  remotes.onFootstep = (pos, running) => audio.footstep(pos, running);
+  // other players' steps: positional (pan + distance) and team-flavoured, with
+  // a per-player throttle so several teammates don't cancel each other out
+  remotes.onFootstep = (pos, running, id, team) => audio.footstep(pos, running, id, team);
   minimap = new Minimap($('minimap'), world.map);
 
   controller = new PlayerController(world, controllerSettings());
   controller.attachTouch(
     $('joystick'), $('look-zone'), $('btn-sprint'), $('btn-jump'),
   );
-  controller.onFootstep = (pos, running) => audio.footstep(null, running); // own steps: no pan
+  // own steps: no panning (they're at the listener), but team-flavoured
+  controller.onFootstep = (pos, running) =>
+    audio.footstep(null, running, 'self', store.get().myTeam);
   controller.onJump = () => audio.jump(null);
-  controller.onLand = () => audio.land(null);
+  controller.onLand = (pos, vy) => audio.land(null, vy < -7);
   controller.onMove = (payload) => net.send(EVENTS.GAME_MOVE, payload);
 
   selfAvatar = createAvatar({ id: 'self', name: localStorage.getItem('hs_name') || 'You', team: store.get().myTeam ?? TEAMS.HIDERS, isSelf: true });
@@ -112,8 +150,18 @@ function startLoop() {
       selfAvatar.setRot(controller.yaw);
       selfAvatar.animate(dt, controller.speed2D, controller.grounded, controller.vy);
 
+      // supply-crate effects: avatar glow + HUD countdown chip
+      const nowL = performance.now();
+      const skew = store.get().clockSkew;
+      const meDto = store.get().lastSnapshot?.pl?.find((p) => p.i === store.get().selfId);
+      const boostLeft = meDto ? Math.max(0, (meDto.bf || 0) + skew - nowL) : 0;
+      const cloakLeft = meDto ? Math.max(0, (meDto.cf || 0) + skew - nowL) : 0;
+      selfAvatar.setEffect(boostLeft > 0 ? 'boost' : cloakLeft > 0 ? 'cloak' : null);
+      updatePowerChip(boostLeft, cloakLeft);
+
       // audio listener + minimap + FIND-button reference position
       audio.setListener(controller.pos, controller.camYaw);
+      audio.setHearRadius(cfg.footstepHearRadius ?? 22);
       hud.selfPos = controller.pos;
       const snap = store.get().lastSnapshot;
       if (snap && minimap) {
@@ -121,12 +169,17 @@ function startLoop() {
         minimap.showFound = cfg.minimapShowFound ?? true;
         minimap.draw(controller.pos, controller.camYaw, snap.pl ?? [], store.get().myTeam, store.get().myStatus);
         if (!settings.showFps) {
-          $('floor-tag').textContent = controller.pos[1] < -1.5 ? 'B1 ARCHIVES' : controller.pos[1] > 4 ? 'ROOFTOP' : 'GROUND';
+          $('floor-tag').textContent = (worldMapId === 'facility')
+            ? (controller.pos[1] < -1.5 ? 'B1 ARCHIVES' : controller.pos[1] > 4 ? 'ROOFTOP' : 'GROUND')
+            : 'GROUND';
         }
       }
+      updateDanger(cfg, snap);
     }
     remotes?.update(dt, now);
+    updateItemsAnim(dt);
     hud.update(now);
+    updateScanButton(now);
     world.renderer.render(world.scene, world.camera);
 
     // fps
@@ -138,6 +191,114 @@ function startLoop() {
     }
   };
   rafId = requestAnimationFrame(loop);
+}
+
+// ---------------- proximity danger (hiders) ----------------
+// A hider who is still hidden hears their own heartbeat speed up as a seeker
+// closes in, and the screen edges bleed red. The seeker's position is only
+// known to us when the server already revealed them, so this cue can never be
+// used to see through walls — it is strictly a "you are about to be caught"
+// tension amplifier built from data the client legitimately has.
+const dangerEl = $('danger-vignette');
+function updateDanger(cfg, snap) {
+  const s = store.get();
+  const isHiddenHider = s.myTeam === TEAMS.HIDERS &&
+    s.myStatus === STATUS.HIDDEN &&
+    s.phase === PHASES.ACTIVE_ROUND;
+  if (!isHiddenHider || !snap || !controller) {
+    if (dangerEl.style.opacity !== '0') dangerEl.style.opacity = '0';
+    return;
+  }
+  const radius = cfg.heartbeatRadius ?? 12;
+  let nearest = Infinity;
+  for (const p of snap.pl ?? []) {
+    if (p.t !== TEAMS.SEEKERS) continue;
+    const d = Math.hypot(p.p[0] - controller.pos[0], p.p[1] - controller.pos[1], p.p[2] - controller.pos[2]);
+    if (d < nearest) nearest = d;
+  }
+  if (nearest > radius) {
+    dangerEl.style.opacity = '0';
+    return;
+  }
+  const t01 = 1 - nearest / radius;               // 0 at the edge, 1 on top of you
+  dangerEl.style.opacity = String((t01 * 0.85).toFixed(3));
+  audio.heartbeat(t01, cfg.heartbeatMinIntervalMs ?? 260, cfg.heartbeatMaxIntervalMs ?? 1300);
+}
+
+// ---------------- supply crates (items) ----------------
+// Glowing crates synced from the snapshot; walk into one to grab it.
+let itemsGroup = null;
+const itemMeshes = new Map();
+const CRATE_BODY_GEO = new THREE.BoxGeometry(1, 1, 1);
+const CRATE_LID_GEO = new THREE.BoxGeometry(1, 1, 1);
+
+function makeCrate(kind) {
+  const color = kind === 'cloak' ? 0x2ee8e8 : 0xffc46b;
+  const g = new THREE.Group();
+  const body = new THREE.Mesh(CRATE_BODY_GEO,
+    new THREE.MeshStandardMaterial({ color: 0x6a5a3a, roughness: 0.85 }));
+  body.scale.set(0.46, 0.4, 0.46);
+  body.position.y = 0.2;
+  const lid = new THREE.Mesh(CRATE_LID_GEO,
+    new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 0.75, roughness: 0.5 }));
+  lid.scale.set(0.5, 0.14, 0.5);
+  lid.position.y = 0.47;
+  const tag = new THREE.Mesh(CRATE_BODY_GEO,
+    new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.5 }));
+  tag.scale.set(0.3, 0.3, 0.47);
+  tag.position.y = 0.2;
+  g.add(body, lid, tag);
+  return g;
+}
+
+function syncItems(items) {
+  if (!world) return;
+  if (!itemsGroup) { itemsGroup = new THREE.Group(); world.scene.add(itemsGroup); }
+  const seen = new Set();
+  for (const it of items ?? []) {
+    seen.add(it.i);
+    let mesh = itemMeshes.get(it.i);
+    if (!mesh) {
+      mesh = makeCrate(it.k);
+      itemsGroup.add(mesh);
+      itemMeshes.set(it.i, mesh);
+    }
+    const x = it.p?.[0] ?? 0, y = it.p?.[1] ?? 0, z = it.p?.[2] ?? 0;
+    mesh.position.x += (x - mesh.position.x) * 0.5; // tiny lerp for smooth appear
+    mesh.position.y = y;
+    mesh.position.z += (z - mesh.position.z) * 0.5;
+  }
+  for (const [id, mesh] of itemMeshes) {
+    if (!seen.has(id)) {
+      itemsGroup.remove(mesh);
+      mesh.traverse((o) => { if (o.isMesh) { o.material.dispose(); } });
+      itemMeshes.delete(id);
+    }
+  }
+  if (!items?.length && itemsGroup) itemsGroup.visible = false;
+  else itemsGroup.visible = true;
+}
+
+function updateItemsAnim(dt) {
+  if (!itemsGroup || !itemsGroup.visible) return;
+  for (const mesh of itemMeshes.values()) {
+    mesh.rotation.y += dt * 0.8;
+    const t = performance.now() * 0.002;
+    mesh.position.y += Math.sin(t + mesh.id) * 0.0006; // gentle float
+  }
+}
+
+function updatePowerChip(boostMs, cloakMs) {
+  const el = $('power-chip');
+  if (boostMs > 0) {
+    el.textContent = `⚡ BOOST ${Math.ceil(boostMs / 1000)}s`;
+    el.className = 'hud-pill power-chip boost';
+  } else if (cloakMs > 0) {
+    el.textContent = `🕶 CLOAK ${Math.ceil(cloakMs / 1000)}s`;
+    el.className = 'hud-pill power-chip cloak';
+  } else if (!el.classList.contains('hidden')) {
+    el.className = 'hud-pill power-chip hidden';
+  }
 }
 
 function enterWorld() {
@@ -154,6 +315,7 @@ function enterWorld() {
 function exitWorld() {
   hud.hide();
   $('blindfold').classList.add('hidden');
+  spawnSyncNeeded = false;
   if (world) {
     remotes?.clear();
     if (selfAvatar?.group.parent) world.scene.remove(selfAvatar.group);
@@ -238,13 +400,12 @@ bus.on(`net:${EVENTS.GAME_PHASE}`, (msg) => {
   if (WORLD_PHASES.has(msg.phase)) {
     enterWorld();
     if (selfAvatar && !selfAvatar.group.parent) world.scene.add(selfAvatar.group);
-    if (msg.phase === PHASES.TEAM_ASSIGNMENT) {
-      // gather at the atrium spawn
-      controller?.teleport([31.5, 0, 33.5], Math.PI);
-      audio.unlock();
-    }
-    if (msg.phase === PHASES.PREPARATION && store.get().myTeam === TEAMS.SEEKERS) {
-      controller?.teleport([32, 0, 41.6], Math.PI);
+    if (msg.phase === PHASES.TEAM_ASSIGNMENT) audio.unlock();
+    // The server places players at the CURRENT map's spawns (gathering / seeker
+    // vestibule). We sync to that position from the next snapshot instead of
+    // hard-coding coordinates — this is what makes multiple maps work.
+    if (msg.phase === PHASES.TEAM_ASSIGNMENT || msg.phase === PHASES.PREPARATION) {
+      spawnSyncNeeded = true;
     }
   } else if (msg.phase === PHASES.LOBBY) {
     exitWorld();
@@ -254,8 +415,19 @@ bus.on(`net:${EVENTS.GAME_PHASE}`, (msg) => {
 });
 
 bus.on(`net:${EVENTS.GAME_SNAPSHOT}`, (snap) => {
-  store.set({ lastSnapshot: snap });
+  store.set({ lastSnapshot: snap, clockSkew: performance.now() - (snap.t || Date.now()) });
   hud.onSnapshot(snap);
+  syncItems(snap.it);
+  // One-time spawn sync: after a phase that re-positions us (gathering /
+  // seeker vestibule), snap to the server's authoritative position. This
+  // replaces the old hard-coded facility coordinates and works for any map.
+  if (spawnSyncNeeded && controller) {
+    const me = (snap.pl ?? []).find((p) => p.i === store.get().selfId);
+    if (me) {
+      controller.teleport(me.p, me.r ?? controller.yaw);
+      spawnSyncNeeded = false;
+    }
+  }
   if (remotes && controller) {
     remotes.selfId = store.get().selfId;
     remotes.applySnapshot(snap.pl ?? [], snap.t, performance.now());
@@ -296,43 +468,109 @@ store.subscribe((state, prev) => {
 
 // ---------------- voice wiring ----------------
 voice.setMicMode(settings.micMode);
+voice.deafened = !!settings.deafened;
 voice._emitState();
+
+const micBtn = $('btn-mic');
+// The mic ON/OFF and speaker-mute controls exist twice — in the in-game HUD top
+// bar and in the lobby voice panel — so they are genuinely ALWAYS visible,
+// whichever screen the player is on. Both copies drive the same handlers.
+const micToggleBtns = [$('btn-mic-toggle'), $('btn-mic-toggle-lobby')].filter(Boolean);
+const muteBtns = [$('btn-mute'), $('btn-mute-lobby')].filter(Boolean);
+const micToggleBtn = micToggleBtns[0];
+const muteBtn = muteBtns[0];
+
 bus.on('voice:state', (state) => {
   hud.onVoiceState(state);
   if (store.get().roomState?.phase === PHASES.LOBBY || store.get().phase === PHASES.LOBBY) lobby.renderVoice(state);
-  // mic button visuals
-  const mic = $('btn-mic');
-  mic.classList.toggle('talking', state.pttActive && !state.muted && state.hasMic);
-  mic.classList.toggle('blocked', state.status === 'error');
-  $('btn-mute').textContent = state.muted ? '🔇' : '🔊';
+
+  // big push-to-talk button
+  const live = state.selfTalking || (state.transmitting && state.hasMic);
+  micBtn.classList.toggle('talking', !!live);
+  micBtn.classList.toggle('blocked', state.status === 'error');
+  micBtn.classList.toggle('off', !state.hasMic);
+  micBtn.querySelector('.mic-tag').textContent =
+    !state.hasMic ? 'MIC OFF' : state.muted ? 'MUTED' : state.micMode === 'open' ? 'OPEN' : 'TALK';
+
+  // dedicated MIC ON/OFF toggle
+  const micUsable = state.hasMic && !state.muted;
+  for (const b of micToggleBtns) {
+    b.classList.toggle('on', micUsable);
+    b.classList.toggle('off', !micUsable);
+    b.setAttribute('aria-pressed', String(micUsable));
+    b.title = micUsable ? 'Microphone ON — tap to turn off' : 'Microphone OFF — tap to turn on';
+    b.textContent = b.id.endsWith('-lobby')
+      ? (micUsable ? '🎙️ MIC ON' : '🚫 MIC OFF')
+      : (micUsable ? '🎙️' : '🚫');
+  }
+
+  // dedicated SPEAKER mute (output)
+  for (const b of muteBtns) {
+    b.classList.toggle('off', state.deafened);
+    b.setAttribute('aria-pressed', String(state.deafened));
+    b.title = state.deafened ? 'Incoming voice MUTED — tap to unmute' : 'Incoming voice on — tap to mute';
+    b.textContent = b.id.endsWith('-lobby')
+      ? (state.deafened ? '🔇 SOUND OFF' : '🔊 SOUND ON')
+      : (state.deafened ? '🔇' : '🔊');
+  }
 });
 
-// push-to-talk inputs
-const micBtn = $('btn-mic');
+// --- push-to-talk (hold the big mic button, or V on desktop) ---
 const pttDown = (e) => {
-  e.preventDefault();
+  e?.preventDefault();
   audio.unlock();
-  if (!voice.provider?.hasMic()) { voice.enableMic(); return; }
+  // getUserMedia must be inside the gesture on iOS — request it, then latch PTT
+  if (!voice.provider?.hasMic()) {
+    voice.enableMic().then((ok) => { if (ok && micHeld) voice.setPtt(true); });
+    return;
+  }
   voice.setPtt(true);
 };
 const pttUp = (e) => { e?.preventDefault(); voice.setPtt(false); };
-micBtn.addEventListener('touchstart', pttDown, { passive: false });
-micBtn.addEventListener('touchend', pttUp, { passive: false });
-micBtn.addEventListener('mousedown', pttDown);
-micBtn.addEventListener('mouseup', pttUp);
-micBtn.addEventListener('mouseleave', () => voice.setPtt(false));
+let micHeld = false;
+micBtn.addEventListener('touchstart', (e) => { micHeld = true; pttDown(e); }, { passive: false });
+const micRelease = (e) => { micHeld = false; pttUp(e); };
+micBtn.addEventListener('touchend', micRelease, { passive: false });
+micBtn.addEventListener('touchcancel', micRelease, { passive: false });
+micBtn.addEventListener('mousedown', (e) => { if (micHeld) return; micHeld = true; pttDown(e); });
+window.addEventListener('mouseup', () => { if (micHeld) { micHeld = false; voice.setPtt(false); } });
+micBtn.addEventListener('mouseleave', () => { if (micHeld) { micHeld = false; voice.setPtt(false); } });
+
+// --- MIC ON/OFF: acquires (or releases) the microphone device ---
+const onMicToggle = async () => {
+  audio.unlock(); audio.click();
+  if (!voice.provider?.hasMic()) {
+    const ok = await voice.enableMic();
+    if (ok) { voice.setMuted(false); hud.toast('Microphone ON'); }
+    else hud.toast(voice.errorMsg || 'Microphone unavailable', true);
+    return;
+  }
+  // has a mic: toggle transmit permission without dropping the device
+  const nowMuted = !voice.muted;
+  voice.setMuted(nowMuted);
+  hud.toast(nowMuted ? 'Microphone muted' : 'Microphone ON');
+};
+for (const b of micToggleBtns) b.addEventListener('click', onMicToggle);
+
+// --- SPEAKER mute: stop hearing other players ---
+const onSpeakerToggle = () => {
+  audio.unlock(); audio.click();
+  voice.setDeafened(!voice.deafened);
+  settings.deafened = voice.deafened;
+  saveSettings(settings);
+  hud.toast(voice.deafened ? 'Incoming voice muted' : 'Incoming voice on');
+};
+for (const b of muteBtns) b.addEventListener('click', onSpeakerToggle);
+
 window.addEventListener('keydown', (e) => {
-  if (e.target?.tagName === 'INPUT') return;
-  if (e.code === 'KeyV') voice.setPtt(true);
+  if (e.target?.tagName === 'INPUT' || e.target?.tagName === 'SELECT') return;
+  if (e.code === 'KeyV' && !e.repeat) pttDown();
   if (e.code === 'KeyF') $('btn-find').click();
-  if (e.code === 'KeyM') voice.setMuted(!voice.muted);
+  if (e.code === 'KeyM') micToggleBtn.click();
+  if (e.code === 'KeyN') muteBtn.click();
+  if (e.code === 'KeyQ') $('btn-scan').click();
 });
 window.addEventListener('keyup', (e) => { if (e.code === 'KeyV') voice.setPtt(false); });
-
-$('btn-mute').addEventListener('click', () => {
-  audio.unlock(); audio.click();
-  voice.setMuted(!voice.muted);
-});
 
 // FIND button
 $('btn-find').addEventListener('click', async () => {
@@ -341,6 +579,71 @@ $('btn-find').addEventListener('click', async () => {
   const res = await net.request(EVENTS.GAME_CATCH, { targetId: hud.findTarget ?? null }, 3000);
   hud.onCatchResult(res);
 });
+
+// ---------------- seeker scan pulse (config: abilitiesEnabled) ----------------
+// A cooldown-gated sonar ping. It only highlights hiders the SERVER has already
+// revealed to us, so it adds pressure and readability without leaking positions.
+const scanBtn = $('btn-scan');
+let scanReadyAt = 0;
+function updateScanButton(now) {
+  const s = store.get();
+  const cfg = currentCfg() ?? {};
+  const usable = !!cfg.abilitiesEnabled &&
+    s.myTeam === TEAMS.SEEKERS &&
+    s.phase === PHASES.ACTIVE_ROUND &&
+    s.myStatus !== STATUS.FOUND;
+  scanBtn.classList.toggle('hidden', !usable);
+  if (!usable) return;
+  const left = Math.max(0, scanReadyAt - now);
+  scanBtn.disabled = left > 0;
+  scanBtn.querySelector('.scan-cd').textContent = left > 0 ? `${Math.ceil(left / 1000)}s` : '';
+}
+scanBtn.addEventListener('click', () => {
+  const cfg = currentCfg() ?? {};
+  if (scanBtn.disabled || !cfg.abilitiesEnabled || !controller) return;
+  audio.unlock();
+  audio.scanPulse();
+  scanReadyAt = performance.now() + (cfg.scanPulseCooldownSec ?? 25) * 1000;
+  const ripple = $('scan-ripple');
+  ripple.classList.remove('go');
+  void ripple.offsetWidth; // restart the CSS animation
+  ripple.classList.add('go');
+  // ping every hider the server has ALREADY revealed to us, inside scan range
+  const snap = store.get().lastSnapshot;
+  const radius = cfg.scanPulseRadius ?? 18;
+  let pinged = 0;
+  for (const p of snap?.pl ?? []) {
+    if (p.t !== TEAMS.HIDERS || p.s !== STATUS.HIDDEN) continue;
+    const d = Math.hypot(p.p[0] - controller.pos[0], p.p[1] - controller.pos[1], p.p[2] - controller.pos[2]);
+    if (d <= radius) { remotes?.getById(p.i)?.avatar.ping?.(); pinged += 1; }
+  }
+  hud.toast(pinged ? `📡 ${pinged} contact${pinged > 1 ? 's' : ''} in range` : '📡 No contacts in range');
+});
+
+// ---------------- kicked by the host ----------------
+bus.on(`net:${EVENTS.ROOM_KICKED}`, ({ by }) => {
+  sessionStorage.removeItem('hs_session');
+  store.set({ session: null, roomState: null, phase: PHASES.LOBBY, selfId: null, myTeam: null, myStatus: null });
+  exitWorld();
+  lobby.showHome();
+  lobby._homeError(`You were removed from the room${by ? ` by ${by}` : ''}.`);
+});
+
+// ---------------- app lifecycle ----------------
+// Backgrounding a mobile browser freezes rAF: every held key/touch would still
+// read as "down" on return and the character would run off on its own.
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    controller?.releaseInputs();
+    voice.setPtt(false);
+  } else {
+    audio.unlock();
+    lastFrame = performance.now(); // never integrate the whole background gap
+  }
+});
+window.addEventListener('blur', () => { controller?.releaseInputs(); voice.setPtt(false); });
+// device rotation (iOS fires this before the new size is settled)
+window.addEventListener('orientationchange', () => setTimeout(() => world?.resize(), 250));
 
 // settings modal — client-side settings
 function renderClientSettings() {
@@ -416,8 +719,10 @@ applySettings();
 
 // QA/debug handle (used by tools/browser-*.mjs; harmless in production)
 window.__debug = {
-  bus, store, net, hud,
+  bus, store, net, hud, audio, voice, settings, createAvatar,
   get controller() { return controller; },
+  get remotes() { return remotes; },
+  get world() { return world; },
   phase: () => store.get().phase,
   snapshot: () => store.get().lastSnapshot,
 };

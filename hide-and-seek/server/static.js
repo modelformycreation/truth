@@ -3,6 +3,7 @@
 // ============================================================================
 
 import { readFile } from 'node:fs/promises';
+import { statSync } from 'node:fs';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -48,8 +49,16 @@ export async function serveStatic(req, res) {
     const data = await readFile(filePath);
     const ext = extname(filePath).toLowerCase();
     const mime = MIME[ext] ?? 'application/octet-stream';
-    const cache = urlPath.startsWith('/vendor/') ? 'public, max-age=86400' : 'no-cache';
-    res.writeHead(200, { 'Content-Type': mime, 'Cache-Control': cache });
+    // Vendor assets (three.js) are big and immutable -> cache a day.
+    // Everything else: NO-STORE. This is a dev/friends game served locally —
+    // players must always get the latest code (a stale cached avatar.js once
+    // made a "new characters" release look unchanged on open tabs).
+    const cache = urlPath.startsWith('/vendor/') ? 'public, max-age=86400' : 'no-store';
+    res.writeHead(200, {
+      'Content-Type': mime,
+      'Cache-Control': cache,
+      'Last-Modified': new Date(statSync(filePath).mtimeMs).toUTCString(),
+    });
     res.end(data);
   } catch {
     res.writeHead(404, { 'Content-Type': 'text/plain' });

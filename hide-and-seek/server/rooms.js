@@ -5,6 +5,7 @@
 // ============================================================================
 
 import { ROOM_CODE_ALPHABET, ROOM_CODE_LENGTH } from '../shared/constants.js';
+import { MAPS } from '../shared/map.js';
 import { GameRoom } from './game-room.js';
 
 export class RoomManager {
@@ -24,6 +25,7 @@ export class RoomManager {
 
   create({ settings = {}, mapId = 'facility' } = {}) {
     if (this.rooms.size >= this.maxRooms) return { error: 'SERVER_FULL' };
+    if (!MAPS[mapId]) return { error: 'UNKNOWN_MAP' };
     let code = this.generateCode();
     let guard = 0;
     while (this.rooms.has(code) && guard++ < 1000) code = this.generateCode(); // no duplicates

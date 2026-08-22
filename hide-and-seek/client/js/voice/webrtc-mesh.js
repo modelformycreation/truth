@@ -22,12 +22,30 @@ export class WebRtcMeshProvider {
     this.localStream = null;
     this.peers = new Map();         // peerId -> { pc, audioEl, polite, makingOffer, ignoreOffer }
     this.volume = 1.0;
+    this.deafened = false;          // output (speaker) mute — separate from mic mute
     this.sendSignal = null;         // (toPeerId, data) => void — set by VoiceManager
     this._analyser = null;
     this._micLevel = 0;
+    this._transmitting = false;
+    this._muted = false;
+    // iOS refuses <audio>.play() outside a gesture; retry every element the
+    // next time the user touches anything.
+    this._pendingPlay = new Set();
+    const retry = () => this._flushPendingPlay();
+    for (const ev of ['pointerdown', 'touchend', 'keydown']) {
+      window.addEventListener(ev, retry, { passive: true });
+    }
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) retry(); });
   }
 
   get name() { return 'webrtc-mesh'; }
+
+  _flushPendingPlay() {
+    for (const el of this._pendingPlay) {
+      el.play().then(() => this._pendingPlay.delete(el)).catch(() => {});
+    }
+    if (this._analyser?.ctx?.state === 'suspended') this._analyser.ctx.resume().catch(() => {});
+  }
 
   /** Ask for the microphone. Must be called from a user gesture. */
   async acquireMic() {
@@ -44,19 +62,53 @@ export class WebRtcMeshProvider {
       // start disabled for push-to-talk
       this.setTransmitting(false);
       this._setupLocalAnalyser();
+      // the mic gesture is also our chance to unblock inbound audio playback
+      this._flushPendingPlay();
+      // a mic acquired after peers already exist must be added to them
+      for (const [, peer] of this.peers) this._attachLocalTracks(peer);
       return true;
     } catch (err) {
       const msg = err?.name === 'NotAllowedError'
         ? 'Microphone permission denied — enable it in your browser settings.'
-        : `Microphone unavailable (${err?.name || 'error'})`;
+        : err?.name === 'NotFoundError'
+          ? 'No microphone found on this device.'
+          : `Microphone unavailable (${err?.name || 'error'})`;
       this.onError?.(msg);
       return false;
     }
   }
 
+  /** Stop and release the microphone entirely (mic OFF). */
+  releaseMic() {
+    this._transmitting = false;
+    this.localStream?.getTracks().forEach((t) => t.stop());
+    this.localStream = null;
+    if (this._analyser) {
+      try { this._analyser.ctx.close(); } catch { /* already closed */ }
+      this._analyser = null;
+    }
+    this._micLevel = 0;
+    this._localTalking = false;
+    this.onSpeaking?.(this.selfId, false);
+  }
+
+  /**
+   * Put our mic on this peer connection.
+   * Every peer is created with exactly ONE sendrecv audio transceiver, so the
+   * mic is attached by swapping the track on its sender. Calling addTrack()
+   * later would append a second m-line and break renegotiation with
+   * "the order of m-lines" errors.
+   */
+  _attachLocalTracks(peer) {
+    const track = this.localStream?.getAudioTracks()[0] ?? null;
+    if (!peer.audioSender) return;
+    try { peer.audioSender.replaceTrack(track); } catch { /* closing */ }
+  }
+
   _setupLocalAnalyser() {
     try {
       const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      if (ctx.state === 'suspended') ctx.resume().catch(() => {});
       const src = ctx.createMediaStreamSource(this.localStream);
       const analyser = ctx.createAnalyser();
       analyser.fftSize = 512;
@@ -64,12 +116,13 @@ export class WebRtcMeshProvider {
       this._analyser = { ctx, analyser, buf: new Uint8Array(analyser.frequencyBinCount) };
       const loop = () => {
         if (!this._analyser) return;
-        const { analyser, buf } = this._analyser;
-        analyser.getByteFrequencyData(buf);
+        const { analyser: an, buf } = this._analyser;
+        an.getByteFrequencyData(buf);
         let sum = 0;
         for (let i = 0; i < buf.length; i++) sum += buf[i];
         const level = sum / buf.length / 255;
-        const talking = this._transmitting && level > 0.06;
+        this._micLevel = level;
+        const talking = this._transmitting && !this._muted && level > 0.045;
         if (talking !== this._localTalking) {
           this._localTalking = talking;
           this.onSpeaking?.(this.selfId, talking);
@@ -81,21 +134,55 @@ export class WebRtcMeshProvider {
   }
 
   hasMic() { return !!this.localStream; }
+  get micLevel() { return this._micLevel; }
+  get transmitting() { return !!this._transmitting && !this._muted && this.hasMic(); }
 
-  /** Push-to-talk gate on the outgoing track. */
+  /**
+   * Push-to-talk gate on the outgoing track.
+   * A muted mic ALWAYS wins: previously setTransmitting(true) re-enabled the
+   * track even while muted, so pressing PTT while muted leaked your audio.
+   */
   setTransmitting(on) {
     this._transmitting = !!on;
-    this.localStream?.getAudioTracks().forEach((t) => (t.enabled = !!on));
+    this._applyTrackState();
   }
 
   setMuted(muted) {
     this._muted = !!muted;
-    this.localStream?.getAudioTracks().forEach((t) => (t.enabled = !muted && !!this._transmitting));
+    this._applyTrackState();
+  }
+
+  _applyTrackState() {
+    const live = this._transmitting && !this._muted;
+    this.localStream?.getAudioTracks().forEach((t) => (t.enabled = live));
+    if (!live && this._localTalking) {
+      this._localTalking = false;
+      this.onSpeaking?.(this.selfId, false);
+    }
+  }
+
+  /** Output (speaker) mute — stop HEARING others, independent of the mic. */
+  setDeafened(deafened) {
+    this.deafened = !!deafened;
+    for (const peer of this.peers.values()) this._applyPeerVolume(peer);
   }
 
   setVolume(v) {
-    this.volume = v;
-    for (const { audioEl } of this.peers.values()) audioEl.volume = v;
+    this.volume = Math.max(0, Math.min(1, Number(v) ?? 1));
+    for (const peer of this.peers.values()) this._applyPeerVolume(peer);
+  }
+
+  /** Per-player output volume (settings screen). */
+  setPeerVolume(peerId, v) {
+    const peer = this.peers.get(peerId);
+    if (!peer) return;
+    peer.userVolume = Math.max(0, Math.min(1, Number(v) ?? 1));
+    this._applyPeerVolume(peer);
+  }
+
+  _applyPeerVolume(peer) {
+    peer.audioEl.muted = this.deafened;
+    peer.audioEl.volume = this.deafened ? 0 : this.volume * (peer.userVolume ?? 1);
   }
 
   /** Join a channel: reconcile our peer set with the member list. */
@@ -106,6 +193,8 @@ export class WebRtcMeshProvider {
     for (const [id, p] of this.peers) {
       if (!ids.includes(id)) {
         p.pc.close();
+        this._pendingPlay.delete(p.audioEl);
+        p.audioEl.srcObject = null;
         p.audioEl.remove();
         this.peers.delete(id);
         this.onSpeaking?.(id, false);
@@ -120,6 +209,8 @@ export class WebRtcMeshProvider {
   leave() {
     for (const [id, p] of this.peers) {
       p.pc.close();
+      this._pendingPlay.delete(p.audioEl);
+      p.audioEl.srcObject = null;
       p.audioEl.remove();
       this.onSpeaking?.(id, false);
     }
@@ -129,48 +220,71 @@ export class WebRtcMeshProvider {
 
   async dispose() {
     this.leave();
-    this._analyser = null;
-    this.localStream?.getTracks().forEach((t) => t.stop());
-    this.localStream = null;
+    this.releaseMic();
   }
 
   _createPeer(peerId) {
-    const pc = new RTCPeerConnection({ iceServers: [{ urls: this.stunUrls }] });
+    const pc = new RTCPeerConnection({ iceServers: [{ urls: String(this.stunUrls).split(',') }] });
     const audioEl = new Audio();
     audioEl.autoplay = true;
-    audioEl.volume = this.volume;
+    // iOS Safari will not play a detached element and needs playsInline
+    audioEl.playsInline = true;
+    audioEl.setAttribute('playsinline', '');
+    audioEl.muted = this.deafened;
+    audioEl.volume = this.deafened ? 0 : this.volume;
+    audioEl.style.display = 'none';
+    document.body.appendChild(audioEl);
     const peer = {
       pc, audioEl,
       // perfect-negotiation: lower id is impolite (offers first)
       polite: this.selfId > peerId,
       makingOffer: false,
       ignoreOffer: false,
+      userVolume: 1,
     };
     this.peers.set(peerId, peer);
 
-    if (this.localStream) {
-      for (const track of this.localStream.getTracks()) pc.addTrack(track, this.localStream);
+    // Exactly one bidirectional audio m-line per peer, created up front. The
+    // mic (if any) is swapped in on the sender — see _attachLocalTracks. This
+    // also means a client with NO mic still receives everyone else's audio.
+    try {
+      const tr = pc.addTransceiver('audio', { direction: 'sendrecv' });
+      peer.audioSender = tr.sender;
+    } catch {
+      // very old browsers: fall back to addTrack
+      if (this.localStream) {
+        for (const t of this.localStream.getAudioTracks()) peer.audioSender = pc.addTrack(t, this.localStream);
+      }
     }
+    this._attachLocalTracks(peer);
     pc.onicecandidate = (e) => {
       if (e.candidate) this.sendSignal?.(peerId, { candidate: e.candidate });
     };
     pc.ontrack = (e) => {
-      audioEl.srcObject = e.streams[0];
-      audioEl.play().catch(() => { /* will start on next gesture */ });
+      // A track attached via addTransceiver()+replaceTrack() carries no msid,
+      // so `e.streams` is EMPTY — wrap the bare track ourselves or the audio
+      // element silently never gets a source and nobody can hear anyone.
+      const stream = e.streams?.[0] ?? new MediaStream([e.track]);
+      audioEl.srcObject = stream;
+      this._applyPeerVolume(peer);
+      audioEl.play().catch(() => { this._pendingPlay.add(audioEl); });
     };
+    // Perfect negotiation: BOTH sides may offer; `polite` only decides who
+    // yields when offers collide. Driving offers solely from the impolite side
+    // meant a mic acquired *after* the peer existed was never renegotiated, so
+    // the polite peer's audio never reached anyone.
+    pc.onnegotiationneeded = () => this._makeOffer(peerId, peer);
     pc.onconnectionstatechange = () => {
-      if (['failed', 'closed'].includes(pc.connectionState)) {
+      if (pc.connectionState === 'failed') {
         // ICE failed (symmetric NAT without TURN) — surface it once
-        if (pc.connectionState === 'failed') {
-          this.onError?.('Voice connection to a teammate failed (strict NAT). Data channel chat still works.');
-        }
+        this.onError?.('Voice connection to a teammate failed (strict NAT). Try again or use a TURN server.');
       }
     };
-    if (!peer.polite) this._makeOffer(peerId, peer);
     return peer;
   }
 
   async _makeOffer(peerId, peer) {
+    if (peer.makingOffer) return;
     try {
       peer.makingOffer = true;
       await peer.pc.setLocalDescription();
@@ -182,18 +296,35 @@ export class WebRtcMeshProvider {
     }
   }
 
-  /** Signaling payload relayed by the server from a channel member. */
+  /**
+   * Signaling payload relayed by the server from a channel member.
+   *
+   * Textbook "perfect negotiation". The politeness test used to be inverted
+   * (`polite && collision`), which made the POLITE peer drop the offer instead
+   * of rolling back. That was harmless while only one side ever offered, but
+   * as soon as both sides can renegotiate (needed so a mic acquired later
+   * reaches existing peers) it deadlocked both ends in `have-local-offer` and
+   * spewed "order of m-lines" errors.
+   */
   async handleSignal(fromId, data) {
     let peer = this.peers.get(fromId);
     if (!peer) peer = this._createPeer(fromId); // we may learn about them via signal first
     const { pc } = peer;
     try {
       if (data.description) {
-        const offerCollision = data.description.type === 'offer' &&
-          (peer.makingOffer || pc.signalingState !== 'stable');
-        peer.ignoreOffer = peer.polite && offerCollision;
+        const readyForOffer = !peer.makingOffer &&
+          (pc.signalingState === 'stable' || peer.settingRemoteAnswerPending);
+        const offerCollision = data.description.type === 'offer' && !readyForOffer;
+
+        // the IMPOLITE peer wins a collision and ignores the incoming offer;
+        // the polite peer rolls back implicitly in setRemoteDescription()
+        peer.ignoreOffer = !peer.polite && offerCollision;
         if (peer.ignoreOffer) return;
+
+        peer.settingRemoteAnswerPending = data.description.type === 'answer';
         await pc.setRemoteDescription(data.description);
+        peer.settingRemoteAnswerPending = false;
+
         if (data.description.type === 'offer') {
           await pc.setLocalDescription();
           this.sendSignal?.(fromId, { description: pc.localDescription });
@@ -206,6 +337,7 @@ export class WebRtcMeshProvider {
         }
       }
     } catch (e) {
+      peer.settingRemoteAnswerPending = false;
       console.warn('signal handling error', e);
     }
   }
