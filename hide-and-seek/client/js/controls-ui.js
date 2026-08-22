@@ -118,7 +118,11 @@ export class ControlsUI {
     this._areaRect = areaRect;
     el.addEventListener('pointerdown', (e) => {
       e.preventDefault();
-      el.setPointerCapture?.(e.pointerId);
+      // NOTE: do NOT call setPointerCapture here. Pointer capture retargets
+      // every subsequent pointer event to this element, so the window-level
+      // pointermove handler below would stop firing the moment the pointer
+      // moves — making the drag feel like it "sometimes doesn't move". Without
+      // capture, window.pointermove keeps tracking even off the element.
       this._pending = { key, el };
     });
   }
