@@ -237,9 +237,43 @@ function startLoop() {
       fpsCounter.value = fpsCounter.frames;
       fpsCounter.frames = 0;
       fpsCounter.t = now;
+      autoTuneQuality(fpsCounter.value);
     }
   };
   rafId = requestAnimationFrame(loop);
+}
+
+// ---------------- dynamic quality auto-tuner ----------------
+// The playtest panel's #1 requested upgrade: "a quality auto-tuner that drops
+// pixel ratio under load". When the smoothed FPS stays low (heavy scene / slow
+// device / throttled tab) we step the renderer's pixel ratio DOWN so the game
+// keeps running smoothly instead of glitching; when it recovers we ease it back
+// up — never above the user's chosen quality cap.
+const TUNE = {
+  cap: null,            // pixel-ratio cap from the user's quality setting
+  low: 0.85,            // multiplier below the cap when FPS is very low
+  high: 1.0,            // full cap when FPS is healthy
+  smooth: 1.0,          // current multiplier (0.85..1)
+  cooldown: 0,          // don't flip every second
+};
+const TUNE_BASE_PR = { low: 1, medium: 1.5, high: 2 };
+function setQualityCap(q) {
+  const dpr = Math.min(devicePixelRatio || 1, 2);
+  TUNE.cap = Math.min(dpr, TUNE_BASE_PR[q] ?? 1.5);
+}
+function autoTuneQuality(fps) {
+  if (!world) return;
+  const now = performance.now();
+  if (now < TUNE.cooldown) return;
+  TUNE.cooldown = now + 3000;
+  const cap = TUNE.cap ?? TUNE_BASE_PR[settings.quality] ?? 1.5;
+  let target = TUNE.smooth;
+  if (fps < 26) target = 0.8;          // struggling: drop pixel ratio hard
+  else if (fps < 34) target = 0.9;     // warm: drop a notch
+  else target = 1.0;                   // healthy: restore
+  if (Math.abs(target - TUNE.smooth) < 0.05) return;
+  TUNE.smooth = target;
+  world.renderer.setPixelRatio(cap * target);
 }
 
 // ---------------- proximity danger (hiders) ----------------
@@ -450,7 +484,12 @@ bus.on(`net:${EVENTS.GAME_PHASE}`, (msg) => {
   if (WORLD_PHASES.has(msg.phase)) {
     enterWorld();
     if (selfAvatar && !selfAvatar.group.parent) world.scene.add(selfAvatar.group);
-    if (msg.phase === PHASES.TEAM_ASSIGNMENT) audio.unlock();
+    if (msg.phase === PHASES.TEAM_ASSIGNMENT) {
+      audio.unlock();
+      // a fresh round starts clean: wipe last round's chat in both boxes
+      lobbyChat?.clear();
+      hudChat?.clear();
+    }
     // The server places players at the CURRENT map's spawns (gathering / seeker
     // vestibule). We sync to that position from the next snapshot instead of
     // hard-coding coordinates — this is what makes multiple maps work.
@@ -462,6 +501,9 @@ bus.on(`net:${EVENTS.GAME_PHASE}`, (msg) => {
     lobby.showLobby();
     store.set({ myTeam: null, myStatus: null });
     updateChatChannel();
+    // game is over — no leftover lobby/team chatter into the next room/session
+    lobbyChat?.clear();
+    hudChat?.clear();
   }
 });
 
@@ -739,6 +781,7 @@ function renderClientSettings() {
 function applySettings() {
   audio.setVolumes({ master: settings.masterVolume, sfx: settings.sfxVolume });
   voice.setVolume(settings.voiceVolume);
+  setQualityCap(settings.quality);
   world?.setQuality(settings.quality);
 }
 
@@ -828,7 +871,12 @@ const controlsUI = new ControlsUI({
     hud.toast('Controls saved (device + game code)');
   },
 });
-$('btn-controls').addEventListener('click', () => { audio.click(); renderControlsCodeHint(); controlsUI.open(); });
+const openControls = () => { audio.click(); renderControlsCodeHint(); controlsUI.open(); };
+$('btn-controls').addEventListener('click', openControls);
+// in-game: the HUD also exposes the CONTROLS screen so players can tweak their
+// layout mid-match (changes apply live through applyControls)
+const hudControlsBtn = $('btn-controls-hud');
+if (hudControlsBtn) hudControlsBtn.addEventListener('click', openControls);
 // show the "remember your game code" hint in the controls screen
 function renderControlsCodeHint() {
   const code = getGameCode();

@@ -88,4 +88,13 @@ export class Chat {
     return div;
   }
 
+  /**
+   * Clear the visible history. Called when a round ends and when everyone
+   * returns to the lobby, so last round's chatter never lingers into the next
+   * one (requested: chats should be gone once a game is over).
+   */
+  clear() {
+    if (this.messages) this.messages.innerHTML = '';
+  }
+
 }
