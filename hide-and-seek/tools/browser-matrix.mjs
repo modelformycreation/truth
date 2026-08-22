@@ -1382,6 +1382,64 @@ try {
     await C2.context().close();
   }
 
+  section('8. In-game controls, host map change, chat clearing');
+  {
+    const H = await mkPage('UX-Host', { viewport: { width: 420, height: 800 } });
+    const G = await mkPage('UX-Guest', { viewport: { width: 420, height: 800 } });
+    const code = await createRoom(H, 'UXHost');
+    await joinRoom(G, 'UXGuest', code);
+    await sleep(500);
+
+    // ---- host-only map picker in the lobby ----
+    const hostSeesMap = await H.evaluate(() => {
+      const row = document.querySelector('.map-pick-row');
+      return !!row && !row.classList.contains('host-only');
+    });
+    check('host sees the map picker in the lobby', hostSeesMap);
+    const guestHiddenMap = await G.evaluate(() => {
+      const row = document.querySelector('.map-pick-row');
+      return !!row && row.classList.contains('host-only');
+    });
+    check('guest does NOT see the map picker', guestHiddenMap);
+
+    // host changes the map -> room state reflects it on BOTH clients
+    await H.selectOption('#lobby-map-select', 'docks');
+    await sleep(700);
+    const mapH = await H.evaluate(() => window.__debug.store.get().roomState.mapId);
+    const mapG = await G.evaluate(() => window.__debug.store.get().roomState.mapId);
+    check('host can change the map from the lobby (broadcast to all)',
+      mapH === 'docks' && mapG === 'docks', `H=${mapH} G=${mapG}`);
+
+    // ---- lobby chat is cleared when a round starts ----
+    await H.fill('#chat-input-lobby', 'pre-round note');
+    await H.click('#chat-send-lobby');
+    await sleep(500);
+    const before = await H.evaluate(() => document.getElementById('chat-messages-lobby').children.length);
+    await hostSettings(H, { minPlayers: 2, preparationSec: 4, roundSec: 300 });
+    await G.click('#btn-ready');
+    await sleep(300);
+    await H.click('#btn-start');
+    await waitPhase(H, 'TEAM_ASSIGNMENT', 20000).catch(() => {});
+    await sleep(700);
+    const after = await H.evaluate(() => document.getElementById('chat-messages-lobby').children.length);
+    check('lobby chat is cleared when a round starts',
+      before >= 1 && after === 0, `before=${before} after=${after}`);
+
+    // ---- in-game CONTROLS button opens the controls screen ----
+    const hudCtl = await H.evaluate(() => {
+      const el = document.getElementById('btn-controls-hud');
+      return !!el && el.getBoundingClientRect().width > 0;
+    });
+    check('in-game CONTROLS button is present in the HUD', hudCtl);
+    await H.click('#btn-controls-hud');
+    const ctlOpen = await H.evaluate(() => !document.getElementById('modal-controls').classList.contains('hidden'));
+    check('in-game CONTROLS screen opens', ctlOpen);
+    await H.click('#btn-controls-close');
+
+    await H.context().close();
+    await G.context().close();
+  }
+
   // ---------------------------------------------------------------- report --
   section('RESULT');
   console.log(`  passed: ${passed}`);
