@@ -1,0 +1,473 @@
+// ============================================================================
+// client/js/avatar.js — Free Fire-style player characters (smooth, rounded)
+//
+//  * SMOOTH low-poly humanoids: capsule limbs/torso, sphere head with a real
+//    face (eyes + pupils, brows, nose, mouth, ears), smooth hair (dome /
+//    spikes / bun / buzz), caps & beanies (torus bands), seeker goggles,
+//    tee / hoodie / jacket, backpack.
+//  * per-player DETERMINISTIC look — seeded from the player id so every
+//    client renders the same player identically.
+//  * full procedural gait: walk & run cycle (leg/arm swing, knee & elbow
+//    bend, hip/chest counter-rotation, head counter-lean, body bob), idle
+//    breathing, airborne tuck, landing squash. Gait phase is driven by real
+//    metres travelled, so the animation matches the footstep audio.
+//  * team cues: coloured armband (hider green / seeker orange) + seeker
+//    goggles; nameplate keeps the old styling.
+//
+// The public API is unchanged: group, state, body, head, setPos, setRot,
+// setFound, setRevealed, setTalking, ping, animate, dispose.
+// ============================================================================
+
+import * as THREE from 'three';
+import { TEAMS } from '../../shared/constants.js';
+import { DEFAULT_CONFIG } from '../../shared/config.js';
+
+const TEAM_COLORS = { [TEAMS.HIDERS]: 0x35d07f, [TEAMS.SEEKERS]: 0xff6a3d };
+const FOUND_COLOR = 0xb9c0cc;
+const DARK = 0x14161c;
+const WHITE = 0xf4f6fa;
+
+// ---- shared / cached geometry (low memory, no per-avatar GC) ----------------
+const GEO = {
+  sphere: new THREE.SphereGeometry(1, 14, 12),   // unit — scaled per part
+  hemi: new THREE.SphereGeometry(1, 14, 10, 0, Math.PI * 2, 0, Math.PI / 2), // dome
+  circle: new THREE.CircleGeometry(1, 16),
+  ring: new THREE.RingGeometry(0.44, 0.55, 20),
+};
+for (const g of Object.values(GEO)) g.userData.shared = true;
+
+const geoCache = new Map();
+function cached(key, make) {
+  let g = geoCache.get(key);
+  if (!g) { g = make(); g.userData.shared = true; geoCache.set(key, g); }
+  return g;
+}
+const capGeo = (r, len) => cached(`cap:${r}:${len}`, () => new THREE.CapsuleGeometry(r, len, 5, 12));
+const cylGeo = (r, h) => cached(`cyl:${r}:${h}`, () => new THREE.CylinderGeometry(r, r * 0.92, h, 14));
+const coneGeo = (r, h) => cached(`cone:${r}:${h}`, () => new THREE.ConeGeometry(r, h, 10));
+const torusGeo = (r, tube) => cached(`torus:${r}:${tube}`, () => new THREE.TorusGeometry(r, tube, 8, 22));
+
+// ---- deterministic look generation -----------------------------------------
+function hashStr(s) {
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return h >>> 0;
+}
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return () => {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+const pick = (rng, arr) => arr[Math.floor(rng() * arr.length) % arr.length];
+
+const SKINS = [0xf1c8a5, 0xe3b285, 0xd29b6b, 0xc08552, 0x9c6b3f, 0x7c5230];
+const HAIRS = [0x14100c, 0x241a10, 0x3b2a18, 0x54402a, 0x7a5a30, 0xb98a4a, 0xd0b060, 0xc23b2e, 0x8a8f9a, 0xd9d9de];
+const SHIRTS = [0x2f6fe0, 0xe0453a, 0xe8a13a, 0x37a06b, 0x8a4fd0, 0xe9e4d8, 0x22304f, 0xe0689a, 0x2ec4c9, 0xf25c5c];
+const PANTS = [0x232a3a, 0x3a3f4a, 0x4a5a3a, 0x5a4632, 0x2e3a5a, 0x303030, 0x453a4a];
+const SHOES = [0xececec, 0x1c1c1e, 0x8a2a2a, 0x2a4a8a, 0x3a3a3a, 0xc7a35a];
+const HAT_COLORS = [0x1f2a44, 0x8a2a2a, 0x2a4a8a, 0xe9e4d8, 0x2f2f33, 0x37a06b];
+const PACK_COLORS = [0x4a5a3a, 0x303030, 0x5a4632, 0x22304f, 0x7a3b2e];
+
+/** Same id -> same outfit, on every client. */
+function outfitFor(id) {
+  const rng = mulberry32(hashStr('blackwood:' + id));
+  return {
+    skin: pick(rng, SKINS),
+    hairColor: pick(rng, HAIRS),
+    hairStyle: pick(rng, ['short', 'spiky', 'buzz', 'bun']),
+    hat: rng() < 0.45 ? { color: pick(rng, HAT_COLORS), style: rng() < 0.6 ? 'cap' : 'beanie' } : null,
+    shirtColor: pick(rng, SHIRTS),
+    shirtStyle: pick(rng, ['tee', 'hoodie', 'jacket']),
+    pantsColor: pick(rng, PANTS),
+    shoeColor: pick(rng, SHOES),
+    pack: rng() < 0.55 ? pick(rng, PACK_COLORS) : null,
+    glasses: rng() < 0.3,
+  };
+}
+
+// ---- small builder helpers ---------------------------------------------------
+// `scaled` parts use the shared unit sphere (stretched into an ellipsoid) —
+// the cheapest way to get rounded Free Fire-style shapes.
+function mesh(parent, geo, mtl, x = 0, y = 0, z = 0, sx = 1, sy = 1, sz = 1, rx = 0) {
+  const m = new THREE.Mesh(geo, mtl);
+  m.position.set(x, y, z);
+  if (sx !== 1 || sy !== 1 || sz !== 1) m.scale.set(sx, sy, sz);
+  if (rx) m.rotation.x = rx;
+  parent.add(m);
+  return m;
+}
+const mat = (color, extra = {}) => new THREE.MeshLambertMaterial({ color, ...extra });
+const shade = (hex, k) => new THREE.Color(hex).multiplyScalar(k);
+
+export function createAvatar({ id, name, team, isSelf = false, isBot = false }) {
+  const group = new THREE.Group();
+  const out = outfitFor(id);
+  const teamColor = TEAM_COLORS[team] ?? 0x9aa5b8;
+
+  // ---------------- materials (per-avatar; disposed in dispose()) -----------
+  const skinMat = mat(out.skin);
+  const hairMat = mat(out.hairColor);
+  const shirtMat = mat(out.shirtColor);
+  const shirtDarkMat = mat(shade(out.shirtColor, 0.68));
+  const pantsMat = mat(out.pantsColor);
+  const bootMat = mat(out.shoeColor);
+  const soleMat = mat(0xf0f0f0);
+  const darkMat = mat(DARK);
+  const whiteMat = mat(WHITE);
+  const teamMat = mat(teamColor, { emissive: new THREE.Color(teamColor).multiplyScalar(0.25) });
+  const glowMats = [shirtMat];
+  const tintMats = [shirtMat, shirtDarkMat, pantsMat, bootMat, hairMat]; // found greys-out
+
+  // ---------------- skeleton ---------------------------------------------------
+  // Avatars face -Z at yaw 0 (see shared/geometry.js facingYaw()).
+  const rig = new THREE.Group();          // bob / squash root (feet at y=0)
+  group.add(rig);
+
+  const hips = new THREE.Group();
+  hips.position.y = 0.95;
+  rig.add(hips);
+  mesh(hips, GEO.sphere, pantsMat, 0, 0, 0, 0.21, 0.14, 0.15); // pelvis (rounded)
+
+  function makeLeg(side) {
+    const leg = new THREE.Group();
+    leg.position.set(0.11 * side, 0, 0);
+    hips.add(leg);
+    mesh(leg, capGeo(0.095, 0.24), pantsMat, 0, -0.215, 0);        // thigh
+    const knee = new THREE.Group();
+    knee.position.y = -0.43;
+    leg.add(knee);
+    mesh(knee, capGeo(0.08, 0.24), pantsMat, 0, -0.20, 0);         // shin
+    mesh(knee, GEO.sphere, bootMat, 0, -0.46, -0.035, 0.105, 0.075, 0.165); // sneaker
+    mesh(knee, GEO.sphere, soleMat, 0, -0.505, -0.04, 0.11, 0.035, 0.17);   // sole
+    return { leg, knee };
+  }
+  const legL = makeLeg(-1), legR = makeLeg(1);
+
+  const chest = new THREE.Group();
+  chest.position.y = 0.33; // world y ≈ 1.28
+  hips.add(chest);
+  const torso = mesh(chest, capGeo(0.20, 0.26), shirtMat, 0, -0.04, 0);      // rounded torso
+  mesh(chest, cylGeo(0.205, 0.07), darkMat, 0, -0.24, 0);                    // belt
+
+  // outfit details
+  if (out.shirtStyle === 'hoodie') {
+    mesh(chest, GEO.sphere, shirtDarkMat, 0, 0.26, 0.14, 0.16, 0.11, 0.13); // hood (bunched)
+    mesh(chest, GEO.sphere, shirtDarkMat, 0, 0.10, -0.185, 0.09, 0.11, 0.05); // front pouch
+  } else if (out.shirtStyle === 'jacket') {
+    mesh(chest, GEO.sphere, shirtDarkMat, -0.185, -0.05, -0.16, 0.05, 0.17, 0.04); // zip panel
+    mesh(chest, GEO.sphere, shirtDarkMat, 0.185, -0.05, -0.16, 0.05, 0.17, 0.04);
+    mesh(chest, GEO.sphere, shirtDarkMat, 0, 0.26, 0.02, 0.13, 0.05, 0.11);   // collar
+  }
+
+  function makeArm(side) {
+    const arm = new THREE.Group();
+    arm.position.set(0.265 * side, 0.25, 0);
+    arm.rotation.z = -0.07 * side; // hang slightly away from the torso
+    chest.add(arm);
+    mesh(arm, GEO.sphere, shirtMat, 0, 0.0, 0, 0.10, 0.09, 0.10);            // shoulder cap
+    mesh(arm, capGeo(0.072, 0.16), shirtMat, 0, -0.14, 0);                   // upper arm / sleeve
+    const elbow = new THREE.Group();
+    elbow.position.y = -0.28;
+    arm.add(elbow);
+    const sleeveMat = out.shirtStyle === 'tee' ? skinMat : shirtMat;
+    mesh(elbow, capGeo(0.065, 0.16), sleeveMat, 0, -0.135, 0);               // forearm
+    mesh(elbow, GEO.sphere, skinMat, 0, -0.30, 0, 0.07, 0.075, 0.07);        // hand
+    return { arm, elbow };
+  }
+  const armL = makeArm(-1), armR = makeArm(1);
+
+  // team armband: smooth band wrapping the right upper arm (r 0.072)
+  const band = mesh(armR.arm, torusGeo(0.074, 0.03), teamMat, 0, -0.08, 0, 1, 1, 1, Math.PI / 2);
+  band.rotation.x = Math.PI / 2; // ring around the arm's (Y) axis
+
+  // backpack (rounded pack + top pocket)
+  if (out.pack != null) {
+    const packMat = mat(out.pack);
+    mesh(chest, GEO.sphere, packMat, 0, -0.05, 0.21, 0.17, 0.22, 0.10);
+    mesh(chest, GEO.sphere, mat(shade(out.pack, 0.65)), 0, 0.12, 0.20, 0.13, 0.08, 0.08);
+    mesh(chest, GEO.sphere, packMat, -0.155, -0.03, -0.17, 0.03, 0.17, 0.025); // straps
+    mesh(chest, GEO.sphere, packMat, 0.155, -0.03, -0.17, 0.03, 0.17, 0.025);
+    tintMats.push(packMat);
+  }
+
+  // ---------------- head (smooth, with a face) ---------------------------------
+  const headRoot = new THREE.Group();
+  headRoot.position.y = 0.32; // world y ≈ 1.60
+  chest.add(headRoot);
+  mesh(headRoot, cylGeo(0.06, 0.13), skinMat, 0, -0.03, 0);      // neck
+  const skull = mesh(headRoot, GEO.sphere, skinMat, 0, 0.11, 0, 0.19, 0.20, 0.185); // head
+  // face (forward = -Z)
+  for (const s of [-1, 1]) {
+    mesh(headRoot, GEO.sphere, whiteMat, 0.055 * s, 0.13, -0.150, 0.034, 0.038, 0.03); // eye white
+    mesh(headRoot, GEO.sphere, darkMat, 0.055 * s, 0.13, -0.172, 0.018, 0.020, 0.018); // pupil
+    mesh(headRoot, GEO.sphere, hairMat, 0.058 * s, 0.175, -0.158, 0.032, 0.010, 0.02); // brow
+    mesh(headRoot, GEO.sphere, skinMat, 0.185 * s, 0.10, 0.0, 0.028, 0.036, 0.03);     // ear
+  }
+  mesh(headRoot, GEO.sphere, skinMat, 0, 0.075, -0.180, 0.022, 0.03, 0.022);           // nose
+  mesh(headRoot, GEO.sphere, mat(shade(out.skin, 0.7)), 0, 0.02, -0.172, 0.040, 0.014, 0.02); // mouth
+
+  function hair() {
+    // smooth dome that hugs the skull: base radius matches the skull's
+    // cross-section at the hairline, height reaches the top of the head
+    const dome = (baseY, baseR, ry, z = 0.005) =>
+      mesh(headRoot, GEO.hemi, hairMat, 0, baseY, z, baseR, ry, baseR * 0.97);
+    switch (out.hairStyle) {
+      case 'buzz':
+        dome(0.20, 0.170, 0.115);
+        break;
+      case 'spiky':
+        dome(0.17, 0.185, 0.14);
+        for (const [sx, h, tilt] of [[-0.09, 0.11, 0.4], [0, 0.15, 0], [0.09, 0.11, -0.4], [-0.045, 0.12, 0.18], [0.045, 0.12, -0.18]]) {
+          const spike = mesh(headRoot, coneGeo(0.045, h), hairMat, sx, 0.29 + h / 2, 0.01);
+          spike.rotation.z = tilt;
+        }
+        break;
+      case 'bun':
+        dome(0.17, 0.185, 0.15);
+        mesh(headRoot, GEO.sphere, hairMat, 0, 0.27, 0.155, 0.075, 0.075, 0.075); // bun
+        break;
+      case 'short':
+      default:
+        dome(0.16, 0.185, 0.17);
+        mesh(headRoot, GEO.sphere, hairMat, 0, 0.235, -0.145, 0.17, 0.05, 0.05); // fringe
+        break;
+    }
+  }
+  hair();
+
+  if (out.hat) {
+    const hatMat = mat(out.hat.color);
+    if (out.hat.style === 'cap') {
+      mesh(headRoot, GEO.hemi, hatMat, 0, 0.19, 0.005, 0.195, 0.15, 0.20);
+      mesh(headRoot, GEO.sphere, hatMat, 0, 0.185, -0.215, 0.15, 0.018, 0.10); // brim
+    } else {
+      mesh(headRoot, GEO.hemi, hatMat, 0, 0.16, 0.005, 0.195, 0.16, 0.20);
+      const bandM = mesh(headRoot, torusGeo(0.185, 0.04), mat(shade(out.hat.color, 0.7)), 0, 0.10, 0);
+      bandM.rotation.x = Math.PI / 2; // folded band around the head
+    }
+    tintMats.push(hatMat);
+  } else if (team === TEAMS.SEEKERS) {
+    // seekers: orange goggle band + dark lenses — reads as "the hunt" at a glance
+    const bandM = mesh(headRoot, torusGeo(0.185, 0.028), mat(0xff6a3d, { emissive: new THREE.Color(0x552200) }), 0, 0.13, 0);
+    bandM.rotation.x = Math.PI / 2;
+    for (const s of [-1, 1]) {
+      mesh(headRoot, GEO.sphere, darkMat, 0.062 * s, 0.13, -0.163, 0.055, 0.05, 0.035); // lens
+    }
+  } else if (out.glasses) {
+    for (const s of [-1, 1]) {
+      mesh(headRoot, GEO.sphere, darkMat, 0.062 * s, 0.13, -0.168, 0.058, 0.048, 0.02); // lens
+    }
+    mesh(headRoot, GEO.sphere, darkMat, 0, 0.135, -0.170, 0.025, 0.012, 0.02);         // bridge
+  }
+
+  // ---------------- static FX (must NOT bob with the gait) ----------------------
+  const blob = new THREE.Mesh(GEO.circle,
+    new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.35 }));
+  blob.scale.set(0.42, 0.42, 1);
+  blob.rotation.x = -Math.PI / 2;
+  blob.position.y = 0.02;
+  group.add(blob);
+
+  const ring = new THREE.Mesh(GEO.ring,
+    new THREE.MeshBasicMaterial({ color: 0xff5b5b, transparent: true, opacity: 0.0, side: THREE.DoubleSide }));
+  ring.rotation.x = -Math.PI / 2;
+  ring.position.y = 0.04;
+  group.add(ring);
+
+  // ---------------- nameplate ----------------------------------------------------
+  const plateCanvas = document.createElement('canvas');
+  plateCanvas.width = 256; plateCanvas.height = 64;
+  const plateTex = new THREE.CanvasTexture(plateCanvas);
+  const plateMat = new THREE.SpriteMaterial({ map: plateTex, transparent: true, depthTest: false });
+  const plate = new THREE.Sprite(plateMat);
+  plate.scale.set(1.9, 0.475, 1);
+  plate.position.y = 2.12;
+  group.add(plate);
+
+  const state = {
+    id, name, team, isSelf, isBot,
+    found: false, revealed: false, talking: false,
+    phase: 0, // gait phase (radians; 2π = one full stride pair)
+  };
+
+  function drawPlate() {
+    const ctx = plateCanvas.getContext('2d');
+    ctx.clearRect(0, 0, 256, 64);
+    ctx.font = '700 26px -apple-system, Segoe UI, Roboto, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const label = `${state.talking ? '🎤 ' : ''}${name}${state.found ? ' (FOUND)' : ''}${isSelf ? ' (you)' : ''}`;
+    ctx.fillStyle = 'rgba(8,10,16,0.6)';
+    const w = Math.min(250, ctx.measureText(label).width + 26);
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(128 - w / 2, 8, w, 48, 12);
+    else ctx.rect(128 - w / 2, 8, w, 48);
+    ctx.fill();
+    ctx.fillStyle = state.found ? '#ffb0b0'
+      : state.talking ? '#35d07f'
+      : team === TEAMS.SEEKERS ? '#ffb894' : '#a9f5cd';
+    ctx.fillText(label, 128, 33);
+    plateTex.needsUpdate = true;
+  }
+  drawPlate();
+
+  // ---------------- procedural gait --------------------------------------------
+  // One damped pose per joint: targets are computed from gait phase / speed,
+  // then exponentially smoothed, so walk <-> idle <-> air transitions never pop.
+  const P = {
+    legL: 0, kneeL: 0, legR: 0, kneeR: 0,
+    armL: 0, elbowL: 0.25, armR: 0, elbowR: 0.25,
+    chestX: -0.02, chestYaw: 0, chestZ: 0, hipYaw: 0, headX: 0,
+    bob: 0,
+  };
+  let wasGrounded = true;
+  let squash = 0;
+
+  function dampTo(key, target, k) { P[key] += (target - P[key]) * k; }
+
+  /**
+   * @param {number} dt      seconds
+   * @param {number} speed   m/s (horizontal)
+   * @param {boolean} grounded
+   * @param {number} jumpVy  vertical velocity m/s (for air stretch)
+   */
+  function animate(dt, speed, grounded, jumpVy) {
+    const now = performance.now();
+    const WALK = DEFAULT_CONFIG.walkSpeed;
+    const SPRINT = DEFAULT_CONFIG.sprintSpeed;
+    const moving = grounded && speed > 0.25;
+    const running = speed > WALK + 0.4;
+    const stride = running
+      ? (DEFAULT_CONFIG.footstepStrideRunM ?? 2.1)
+      : (DEFAULT_CONFIG.footstepStrideWalkM ?? 1.6);
+    // gait frequency = real step frequency: one full cycle per two strides
+    if (moving) state.phase += dt * speed * (Math.PI / stride);
+    else state.phase += dt * 2.0;
+
+    const φ = state.phase;
+    const s = Math.sin(φ), c = Math.cos(φ);
+    const t = Math.min(1, speed / WALK);
+    const runT = Math.min(1, Math.max(0, (speed - WALK) / (SPRINT - WALK)));
+    const legAmp = 0.42 * t + 0.42 * runT;
+    const armAmp = legAmp * 0.8;
+
+    let T;
+    if (!grounded) {
+      // air tuck: lead leg forward, trail leg back, arms up
+      T = {
+        legL: -0.5, kneeL: -0.7, legR: 0.35, kneeR: -0.25,
+        armL: 0.5, elbowL: 0.9, armR: 0.3, elbowR: 0.9,
+        chestX: -0.15, chestYaw: 0, chestZ: 0, hipYaw: 0, headX: 0.08, bob: 0,
+      };
+    } else if (moving) {
+      // scissoring gait: arms oppose same-side legs, knees bend on the
+      // forward swing, hips twist against the chest (Free Fire-style bounce)
+      T = {
+        legL: s * legAmp,
+        kneeL: -Math.max(0, c) * 1.4 * legAmp,
+        legR: -s * legAmp,
+        kneeR: -Math.max(0, -c) * 1.4 * legAmp,
+        armL: -s * armAmp + 0.12,
+        elbowL: 0.35 + 0.5 * runT + 0.18 * Math.abs(c),
+        armR: s * armAmp + 0.12,
+        elbowR: 0.35 + 0.5 * runT + 0.18 * Math.abs(c),
+        chestX: -(0.02 + Math.min(0.20, speed * 0.04)),
+        chestYaw: -s * (0.05 + 0.08 * runT),
+        chestZ: s * 0.05 * (0.4 + 0.6 * runT),
+        hipYaw: s * (0.06 + 0.09 * runT),
+        headX: Math.min(0.20, speed * 0.04) * 0.6,
+        bob: Math.abs(Math.sin(φ)) * (0.035 + 0.03 * runT) * Math.max(t, runT),
+      };
+    } else {
+      // idle: breathing + a hint of weight shift
+      const br = Math.sin(now * 0.0022);
+      T = {
+        legL: 0, kneeL: 0.05, legR: 0, kneeR: 0.05,
+        armL: 0.06 + br * 0.02, elbowL: 0.25 + 0.03 * br,
+        armR: 0.06 - br * 0.02, elbowR: 0.25 + 0.03 * br,
+        chestX: -0.02 + br * 0.008, chestYaw: 0, chestZ: 0, hipYaw: 0,
+        headX: -br * 0.008,
+        bob: 0.006 * (1 + br),
+      };
+    }
+
+    // landing squash trigger
+    if (grounded && !wasGrounded) squash = 1;
+    wasGrounded = grounded;
+    squash *= Math.exp(-dt * 9);
+
+    const k = 1 - Math.exp(-dt * 14);
+    for (const key of Object.keys(T)) dampTo(key, T[key], k);
+
+    legL.leg.rotation.x = P.legL;  legL.knee.rotation.x = P.kneeL;
+    legR.leg.rotation.x = P.legR;  legR.knee.rotation.x = P.kneeR;
+    armL.arm.rotation.x = P.armL;  armL.elbow.rotation.x = P.elbowL;
+    armR.arm.rotation.x = P.armR;  armR.elbow.rotation.x = P.elbowR;
+    hips.rotation.y = P.hipYaw;
+    chest.rotation.set(P.chestX, P.chestYaw, P.chestZ);
+    headRoot.rotation.x = P.headX;
+    rig.position.y = P.bob;
+
+    let sy = 1 - 0.14 * squash;
+    if (!grounded && jumpVy != null) sy += Math.max(-0.05, Math.min(0.07, jumpVy * 0.012));
+    rig.scale.set(1, sy, 1);
+
+    // ---- glow: scan ping / revealed shimmer / found grey ----------------------
+    const pinged = state.pingUntil && now < state.pingUntil;
+    if (pinged) {
+      const p = 0.5 + 0.5 * Math.sin(now * 0.02);
+      for (const m of glowMats) {
+        m.emissive = m.emissive || new THREE.Color();
+        m.emissive.setRGB(0.1 * p, 0.35 * p, 0.75 * p);
+      }
+      ring.material.color.setHex(0x5b8cff);
+      ring.material.opacity = 0.35 + 0.5 * p;
+    } else if (state.revealed && !state.found) {
+      const pulse = 0.5 + 0.5 * Math.sin(now * 0.008);
+      for (const m of glowMats) {
+        m.emissive = m.emissive || new THREE.Color();
+        m.emissive.setRGB(0.25 * pulse, 0.18 * pulse, 0.02 * pulse);
+      }
+    } else if (!state.found) {
+      for (const m of glowMats) m.emissive?.setRGB(0, 0, 0);
+      if (ring.material.opacity > 0) ring.material.opacity = 0;
+    }
+  }
+
+  return {
+    group, state, body: torso, head: skull,
+    setPos(x, y, z) { group.position.set(x, y, z); },
+    setRot(r) { group.rotation.y = r; },
+    setFound() {
+      if (state.found) return;
+      state.found = true;
+      for (const m of tintMats) m.color.set(FOUND_COLOR);
+      ring.material.color.setHex(0xff5b5b);
+      ring.material.opacity = 0.9;
+      drawPlate();
+    },
+    setRevealed(on) { state.revealed = !!on; },
+    setTalking(on) { if (state.talking !== on) { state.talking = !!on; drawPlate(); } },
+
+    /** Scan-pulse contact marker: flare this avatar for a couple of seconds. */
+    ping() { state.pingUntil = performance.now() + 2200; },
+
+    animate,
+    dispose(scene) {
+      scene.remove(group);
+      group.traverse((o) => {
+        if (o.isMesh) {
+          if (o.geometry && !o.geometry.userData.shared) o.geometry.dispose();
+          const ms = Array.isArray(o.material) ? o.material : [o.material];
+          for (const m of ms) m?.dispose?.();
+        }
+      });
+      plateTex.dispose();
+      plateMat.dispose();
+    },
+  };
+}

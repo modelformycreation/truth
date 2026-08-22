@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="theme-color" content="#0b0e14" />
+  <title>BLACKWOOD — Hide &amp; Seek</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔎</text></svg>" />
+  <link rel="stylesheet" href="./css/style.css" />
+  <script type="importmap">
+    { "imports": { "three": "./vendor/three.module.min.js" } }
+  </script>
+  <script src="/socket.io/socket.io.js"></script>
+</head>
+<body>
+  <canvas id="game-canvas"></canvas>
+
+  <!-- ================= HOME ================= -->
+  <div id="screen-home" class="screen">
+    <div class="home-card">
+      <div class="logo">BLACKWOOD</div>
+      <div class="tagline">multiplayer hide &amp; seek — facility breach</div>
+      <input id="input-name" maxlength="16" placeholder="Your name" autocomplete="off" />
+      <div class="map-pick">
+        <label for="select-map" class="map-pick-lbl">MAP (host picks)</label>
+        <select id="select-map" class="map-select">
+          <option value="facility">Blackwood Research Facility</option>
+          <option value="docks">The Old Docks</option>
+          <option value="mall">Mall of Shadows</option>
+        </select>
+      </div>
+      <button id="btn-create" class="btn primary big">CREATE ROOM</button>
+      <div class="join-row">
+        <input id="input-code" maxlength="6" placeholder="ROOM CODE" autocomplete="off" autocapitalize="characters" />
+        <button id="btn-join" class="btn">JOIN</button>
+      </div>
+      <button id="btn-rejoin" class="btn subtle hidden">↩ REJOIN ROOM <span id="rejoin-code"></span></button>
+      <div id="home-error" class="error"></div>
+      <div class="home-foot">mobile · headphones recommended · mic optional</div>
+    </div>
+  </div>
+
+  <!-- ================= LOBBY ================= -->
+  <div id="screen-lobby" class="screen hidden">
+    <div class="lobby-wrap">
+      <div class="lobby-head">
+        <div class="room-code-box">
+          <span class="lbl">ROOM CODE</span>
+          <span id="room-code" class="code">------</span>
+          <button id="btn-copy" class="btn tiny">COPY</button>
+        </div>
+        <button id="btn-leave" class="btn tiny danger">LEAVE</button>
+      </div>
+      <div class="lobby-cols">
+        <div class="lobby-main">
+          <div id="lobby-players" class="player-list"></div>
+          <div class="lobby-actions">
+            <div class="pref-row" id="pref-row">
+              <span>Team preference</span>
+              <div class="seg" id="pref-seg">
+                <button data-pref="HIDERS" class="hider">HIDE</button>
+                <button data-pref="any" class="on">ANY</button>
+                <button data-pref="SEEKERS" class="seeker">SEEK</button>
+              </div>
+            </div>
+            <button id="btn-ready" class="btn big">READY UP</button>
+            <button id="btn-start" class="btn primary big hidden">START MATCH</button>
+            <div id="start-hint" class="hint"></div>
+          </div>
+        </div>
+        <div class="lobby-side">
+          <div class="panel host-panel">
+            <div class="panel-title">HOST SETTINGS <span class="crown">👑</span></div>
+            <div id="host-settings" class="settings-grid"></div>
+            <div class="bot-row">
+              <button id="btn-add-bot" class="btn tiny">＋ BOT HIDER</button>
+              <button id="btn-remove-bot" class="btn tiny danger">－ REMOVE BOT</button>
+            </div>
+            <div class="hint">Bots stand still once hidden — practice dummies for FIND.<br>Host tip: tap ✕ on any player row to remove them.</div>
+          </div>
+          <div class="panel voice-panel">
+            <div class="panel-title">🎤 VOICE</div>
+            <div id="voice-status" class="hint">Team voice activates when the round starts.</div>
+            <div class="voice-panel-row">
+              <button id="btn-mic-toggle-lobby" class="btn tiny" aria-pressed="false">🚫 MIC OFF</button>
+              <button id="btn-mute-lobby" class="btn tiny" aria-pressed="false">🔊 SOUND ON</button>
+            </div>
+            <button id="btn-voice-perm" class="btn tiny">ENABLE MICROPHONE</button>
+            <div id="voice-members" class="voice-members"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= HUD ================= -->
+  <div id="hud" class="hidden">
+    <div class="hud-top">
+      <div class="hud-pill" id="pill-team">—</div>
+      <div class="hud-pill timer" id="pill-timer">00:00</div>
+      <div class="hud-pill" id="pill-hidden">HIDDEN —</div>
+      <div class="hud-flex"></div>
+      <button id="btn-mic-toggle" class="hud-btn" aria-label="Microphone on/off" aria-pressed="false" title="Microphone on/off">🎙️</button>
+      <button id="btn-mute" class="hud-btn" aria-label="Mute incoming voice" aria-pressed="false" title="Speaker (incoming voice)">🔊</button>
+      <button id="btn-minimap" class="hud-btn">🗺</button>
+      <button id="btn-settings" class="hud-btn">⚙️</button>
+    </div>
+
+    <div id="feed" class="feed"></div>
+
+    <div id="minimap-wrap">
+      <canvas id="minimap" width="150" height="112"></canvas>
+      <div id="floor-tag"></div>
+    </div>
+
+    <div id="speakers" class="speakers"></div>
+
+    <!-- touch controls (shown on touch devices — see .touch-ui in style.css) -->
+    <div id="joystick" class="joystick">
+      <div class="stick-base"><div class="stick-nub"></div></div>
+    </div>
+    <div id="look-zone"></div>
+    <div class="action-cluster">
+      <button id="btn-sprint" class="btn round" aria-label="Sprint" aria-pressed="false">🏃</button>
+      <button id="btn-jump" class="btn round" aria-label="Jump">⬆</button>
+    </div>
+
+    <button id="btn-find" class="find-btn" disabled>
+      <span class="find-icon">🔎</span>
+      <span class="find-label">FIND</span>
+    </button>
+
+    <div class="voice-cluster">
+      <button id="btn-mic" class="btn round mic" aria-label="Hold to talk">
+        <span class="mic-icon">🎤</span>
+        <span class="mic-tag">TALK</span>
+      </button>
+    </div>
+
+    <button id="btn-scan" class="scan-btn hidden" aria-label="Scan pulse">
+      <span class="scan-icon">📡</span>
+      <span class="scan-label">SCAN</span>
+      <span class="scan-cd"></span>
+    </button>
+
+    <div id="center-banner" class="center-banner hidden"></div>
+    <div id="blindfold" class="blindfold hidden">
+      <div class="bf-inner">
+        <div class="bf-emoji">🙈</div>
+        <div class="bf-title">SEEKERS — EYES CLOSED</div>
+        <div class="bf-sub">Hiders are finding spots…</div>
+        <div class="bf-count" id="bf-count">30</div>
+      </div>
+    </div>
+    <div id="caught-flash" class="caught-flash hidden">💥 FOUND!</div>
+  </div>
+
+  <!-- ================= RESULTS ================= -->
+  <div id="screen-results" class="screen hidden">
+    <div class="results-card">
+      <div id="results-title" class="results-title">—</div>
+      <div id="results-sub" class="results-sub"></div>
+      <div id="results-stats" class="results-stats"></div>
+      <div id="results-players" class="results-players"></div>
+      <div class="hint">Returning to lobby…</div>
+    </div>
+  </div>
+
+  <!-- ================= SETTINGS MODAL ================= -->
+  <div id="modal-settings" class="modal hidden">
+    <div class="modal-card">
+      <div class="panel-title">SETTINGS</div>
+      <div class="settings-grid" id="client-settings"></div>
+      <div class="modal-actions">
+        <button id="btn-close-settings" class="btn">CLOSE</button>
+        <button id="btn-leave-2" class="btn danger">LEAVE ROOM</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="conn-banner" class="conn-banner hidden">⚠ Connection lost — reconnecting…</div>
+  <div id="danger-vignette"></div>
+  <div id="scan-ripple"></div>
+  <div id="toast-area"></div>
+
+  <script type="module" src="./js/main.js"></script>
+</body>
+</html>
