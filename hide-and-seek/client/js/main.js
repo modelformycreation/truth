@@ -23,6 +23,13 @@ import { EVENTS, PHASES, TEAMS, STATUS } from '../../shared/constants.js';
 const $ = (id) => document.getElementById(id);
 const WORLD_PHASES = new Set([PHASES.TEAM_ASSIGNMENT, PHASES.PREPARATION, PHASES.ACTIVE_ROUND, PHASES.ROUND_END, PHASES.RESULTS]);
 
+// Build tag: shown on the home screen so players (and testers) can tell which
+// code they are actually running — an open tab keeps running the old build
+// until it is reloaded, and this is the fastest way to notice that.
+const BUILD = 'ff-2026-08-22b';
+console.log(`[BLACKWOOD] client build ${BUILD}`);
+$('build-tag').textContent = BUILD;
+
 // ---------------- touch capability ----------------
 // A media query alone lies on hybrid laptops and in some emulators; combine it
 // with the real touch-point count and mark <body> so CSS + input agree.

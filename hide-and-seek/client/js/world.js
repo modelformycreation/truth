@@ -44,7 +44,9 @@ export function buildWorld(canvas, quality = 'medium', mapId = 'facility') {
   scene.fog = new THREE.Fog(0x0d1018, 18, 78);
 
   const pixelRatio = quality === 'low' ? 1 : quality === 'high' ? Math.min(devicePixelRatio, 2) : Math.min(devicePixelRatio, 1.5);
-  const renderer = new THREE.WebGLRenderer({ canvas, antialias: quality === 'high', powerPreference: 'high-performance' });
+  // Antialias is always on: aliased silhouette edges are the main thing that
+  // makes the low-poly characters read as "blocky / Minecraft" on laptops.
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
   renderer.setPixelRatio(pixelRatio);
   renderer.setSize(innerWidth, innerHeight);
 
