@@ -13,17 +13,23 @@
 // ============================================================================
 
 export class WebRtcMeshProvider {
-  constructor({ selfId, onSpeaking, onError, stunUrls }) {
+  constructor({ selfId, onSpeaking, onError, stunUrls, iceServers }) {
     this.selfId = selfId;
     this.onSpeaking = onSpeaking;   // (peerId, talking) — local analyser detection
     this.onError = onError;         // (message)
     this.stunUrls = stunUrls || 'stun:stun.l.google.com:19302';
+    // Feature 1: a full ICE server list (STUN + TURN with credentials) served
+    // by the server at /api/config. When present it replaces the STUN-only
+    // string so cross-network peers can relay through the host's Coturn.
+    this.iceServers = iceServers && iceServers.length ? iceServers : null;
     this.channel = null;
     this.localStream = null;
     this.peers = new Map();         // peerId -> { pc, audioEl, polite, makingOffer, ignoreOffer }
     this.volume = 1.0;
     this.deafened = false;          // output (speaker) mute — separate from mic mute
     this.sendSignal = null;         // (toPeerId, data) => void — set by VoiceManager
+    this.onIceState = null;         // (state) => void — Feature 1 voice-status
+    this._iceState = 'new';         // 'new' | 'connecting' | 'connected' | 'failed'
     this._analyser = null;
     this._micLevel = 0;
     this._transmitting = false;
@@ -185,6 +191,33 @@ export class WebRtcMeshProvider {
     peer.audioEl.volume = this.deafened ? 0 : this.volume * (peer.userVolume ?? 1);
   }
 
+  /**
+   * Feature 1 — aggregate ICE state across the mesh, for the visible
+   * VOICE STATUS. Prefers "connected" if any peer is connected; otherwise
+   * "connecting" while peers exist; "failed" if every peer failed (strict NAT
+   * with no working TURN); "new" when there are no peers at all.
+   */
+  _recomputeIceState() {
+    let state = 'new';
+    let any = false, failed = true;
+    for (const [, p] of this.peers) {
+      any = true;
+      const cs = p.pc.connectionState;
+      if (cs === 'connected' || cs === 'completed') { state = 'connected'; break; }
+      if (cs !== 'failed') failed = false;
+    }
+    if (state !== 'connected') {
+      if (any && failed) state = 'failed';
+      else if (any) state = 'connecting';
+      else state = 'new';
+    }
+    if (state !== this._iceState) {
+      this._iceState = state;
+      this.onIceState?.(state);
+    }
+    return state;
+  }
+
   /** Join a channel: reconcile our peer set with the member list. */
   joinChannel(channel, members) {
     this.channel = channel;
@@ -204,6 +237,7 @@ export class WebRtcMeshProvider {
     for (const id of ids) {
       if (!this.peers.has(id)) this._createPeer(id);
     }
+    this._recomputeIceState();
   }
 
   leave() {
@@ -216,6 +250,7 @@ export class WebRtcMeshProvider {
     }
     this.peers.clear();
     this.channel = null;
+    this._recomputeIceState();
   }
 
   async dispose() {
@@ -224,7 +259,10 @@ export class WebRtcMeshProvider {
   }
 
   _createPeer(peerId) {
-    const pc = new RTCPeerConnection({ iceServers: [{ urls: String(this.stunUrls).split(',') }] });
+    // Feature 1: use the structured STUN+TURN list from /api/config when the
+    // server gave us one; otherwise fall back to parsing the STUN-only string.
+    const iceServers = this.iceServers || [{ urls: String(this.stunUrls).split(',') }];
+    const pc = new RTCPeerConnection({ iceServers });
     const audioEl = new Audio();
     audioEl.autoplay = true;
     // iOS Safari will not play a detached element and needs playsInline
@@ -279,6 +317,7 @@ export class WebRtcMeshProvider {
         // ICE failed (symmetric NAT without TURN) — surface it once
         this.onError?.('Voice connection to a teammate failed (strict NAT). Try again or use a TURN server.');
       }
+      this._recomputeIceState();
     };
     return peer;
   }

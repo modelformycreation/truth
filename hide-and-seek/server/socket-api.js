@@ -6,7 +6,7 @@
 
 import { EVENTS, MAX_NAME_LENGTH } from '../shared/constants.js';
 
-export function attachSocketAPI(io, manager, config = {}, log = () => {}) {
+export function attachSocketAPI(io, manager, config = {}, log = () => {}, extra = {}) {
   io.on('connection', (socket) => {
     const ctx = { room: null, player: null };
 
@@ -79,7 +79,10 @@ export function attachSocketAPI(io, manager, config = {}, log = () => {}) {
         return;
       }
       if (ctx.player.socket !== socket) return; // stale socket after reconnect
-      if (!allow(event, rate)) {
+      // `rate` may be a number or a lazy () => number (evaluated now that the
+      // player is in a room, so it can read room config).
+      const perSec = typeof rate === 'function' ? rate() : rate;
+      if (!allow(event, perSec)) {
         ack?.({ ok: false, error: 'RATE' }); // never leave a client waiting on an ack
         return;
       }
@@ -147,6 +150,23 @@ export function attachSocketAPI(io, manager, config = {}, log = () => {}) {
     socket.on(EVENTS.VOICE_MUTED, needRoom(EVENTS.VOICE_MUTED, ({ muted } = {}) => {
       ctx.room.voice.setMuted(ctx.player, !!muted);
     }, 5));
+
+    // ---- chat (Feature 5): server-relayed, team-split in-round, rate limited ----
+    socket.on(EVENTS.CHAT_SEND, needRoom(EVENTS.CHAT_SEND, ({ text } = {}) => {
+      ctx.room.sendChat(ctx.player, text);
+    }, () => Math.max(1, Math.round(ctx.room?.cfg?.chatRatePerSec ?? 4))));
+
+    // ---- controls (Feature 6): custom-control persistence, room-independent ----
+    socket.on(EVENTS.CONTROLS_GET, ({ code, deviceId } = {}, ack) => {
+      if (!allow('controlsGet', 5)) return ack?.({ ok: false, error: 'RATE' });
+      const saved = extra.controls?.get({ code, deviceId }) ?? null;
+      ack?.({ ok: true, controls: saved });
+    });
+    socket.on(EVENTS.CONTROLS_SAVE, ({ code, deviceId, controls: ctrl } = {}, ack) => {
+      if (!allow('controlsSave', 3)) return ack?.({ ok: false, error: 'RATE' });
+      const res = extra.controls?.save({ code, deviceId, controls: ctrl }) ?? { error: 'DISABLED' };
+      ack?.({ ok: res.ok, error: res.error ?? null });
+    });
 
     log(`socket connected: ${socket.id}`);
   });

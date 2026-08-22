@@ -5,6 +5,7 @@
 
 import { EVENTS, TEAMS } from '../../shared/constants.js';
 import { ROOM_SETTINGS_SCHEMA } from '../../shared/config.js';
+import { getGameCode, setGameCode } from './controls.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -43,10 +44,15 @@ export class LobbyUI {
     const nameInput = $('input-name');
     nameInput.value = localStorage.getItem('hs_name') || '';
 
+    // Feature 6: the user's secret game code (identity for control persistence)
+    const codeInput = $('input-gamecode');
+    codeInput.value = getGameCode();
+
     $('btn-create').addEventListener('click', async () => {
       this.audio.unlock(); this.audio.click();
       const name = this._saveName(nameInput);
       if (!name) return this._homeError('Enter a name first');
+      this._saveGameCode(codeInput);
       const mapId = $('select-map')?.value || 'facility';
       const res = await this.net.request(EVENTS.ROOM_CREATE, { name, mapId });
       if (!res.ok) return this._homeError(res.message || res.error || 'Could not create room');
@@ -140,6 +146,7 @@ export class LobbyUI {
     const code = $('input-code').value.trim().toUpperCase();
     if (!name) return this._homeError('Enter a name first');
     if (!/^[A-HJ-NP-Z2-9]{6}$/.test(code)) return this._homeError('Enter the 6-character room code');
+    this._saveGameCode($('input-gamecode'));
     const res = await this.net.request(EVENTS.ROOM_JOIN, { code, name });
     if (!res.ok) return this._homeError(res.message || res.error || 'Could not join');
     this._rememberSession(res);
@@ -157,6 +164,20 @@ export class LobbyUI {
     const name = input.value.trim().slice(0, 16);
     if (name) localStorage.setItem('hs_name', name);
     return name;
+  }
+
+  /**
+   * Feature 6 — persist the user's secret game code. First time: they create a
+   * code; returning: they re-enter it to reload their controls. We always show
+   * a "remember this code" reminder so nobody loses their layout.
+   */
+  _saveGameCode(input) {
+    const wasEmpty = !getGameCode();
+    const code = setGameCode(input.value);
+    if (code && wasEmpty) {
+      this._toast(`Remember "${code}" — it's your game code, no one else can see it.`);
+    }
+    return code;
   }
 
   _rememberSession(res) {
@@ -348,7 +369,15 @@ export class LobbyUI {
     } else {
       permBtn.classList.add('hidden');
       const ch = state.channel === TEAMS.HIDERS ? '🟢 HIDER channel' : state.channel === TEAMS.SEEKERS ? '🟠 SEEKER channel' : state.channel === 'lobby' ? 'lobby (everyone)' : '—';
-      el.innerHTML = `Mic ready · ${ch}<br><span style="opacity:.7">${state.members.length} in channel</span>`;
+      // Feature 1: visible VOICE STATUS — MIC: LIVE / ICE CONNECTING / FAILED
+      const ice = state.iceState === 'failed'
+        ? '<b style="color:#ff9c9c">ICE FAILED</b>'
+        : state.iceState === 'connecting'
+          ? '<b style="color:#5b8cff">ICE CONNECTING…</b>'
+          : state.iceState === 'connected'
+            ? '<b style="color:#35d07f">CONNECTED</b>'
+            : 'no peers yet';
+      el.innerHTML = `Mic ready · ${ch}<br><span style="opacity:.7">${state.members.length} in channel · ${ice}</span>`;
     }
 
     // per-player volume sliders + live speaking indicators

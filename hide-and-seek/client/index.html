@@ -24,6 +24,7 @@
       <div class="logo">BLACKWOOD</div>
       <div class="tagline">multiplayer hide &amp; seek — facility breach</div>
       <input id="input-name" maxlength="16" placeholder="Your name" autocomplete="off" />
+      <input id="input-gamecode" maxlength="128" placeholder="Your secret game code (optional — set it once, remember it)" autocomplete="off" />
       <div class="map-pick">
         <label for="select-map" class="map-pick-lbl">MAP (host picks)</label>
         <select id="select-map" class="map-select">
@@ -52,7 +53,10 @@
           <span id="room-code" class="code">------</span>
           <button id="btn-copy" class="btn tiny">COPY</button>
         </div>
-        <button id="btn-leave" class="btn tiny danger">LEAVE</button>
+        <div class="lobby-head-actions">
+          <button id="btn-controls" class="btn tiny">🕹 CONTROLS</button>
+          <button id="btn-leave" class="btn tiny danger">LEAVE</button>
+        </div>
       </div>
       <div class="lobby-cols">
         <div class="lobby-main">
@@ -91,6 +95,16 @@
             <button id="btn-voice-perm" class="btn tiny">ENABLE MICROPHONE</button>
             <div id="voice-members" class="voice-members"></div>
           </div>
+
+          <div class="panel chat-panel">
+            <div class="panel-title">💬 CHAT <span id="chat-channel-lobby" class="chat-channel">LOBBY</span></div>
+            <div id="chat-messages-lobby" class="chat-messages"></div>
+            <div id="chat-quick-lobby" class="chat-quick-row"></div>
+            <div class="chat-input-row">
+              <input id="chat-input-lobby" maxlength="140" placeholder="Message everyone…" autocomplete="off" />
+              <button id="chat-send-lobby" class="btn tiny" aria-label="Send">➤</button>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -103,10 +117,12 @@
       <div class="hud-pill timer" id="pill-timer">00:00</div>
       <div class="hud-pill" id="pill-hidden">HIDDEN —</div>
       <div class="hud-pill power-chip hidden" id="power-chip"></div>
+      <div class="hud-pill voice-status hidden" id="pill-voice-status" title="Voice connection status">🎤 …</div>
       <div class="hud-flex"></div>
       <button id="btn-mic-toggle" class="hud-btn" aria-label="Microphone on/off" aria-pressed="false" title="Microphone on/off">🎙️</button>
       <button id="btn-mute" class="hud-btn" aria-label="Mute incoming voice" aria-pressed="false" title="Speaker (incoming voice)">🔊</button>
       <button id="btn-minimap" class="hud-btn">🗺</button>
+      <button id="btn-chat" class="hud-btn" aria-label="Chat">💬</button>
       <button id="btn-settings" class="hud-btn">⚙️</button>
     </div>
 
@@ -147,6 +163,18 @@
       <span class="scan-cd"></span>
     </button>
 
+    <div id="chat-overlay" class="chat-overlay hidden">
+      <div class="chat-overlay-card">
+        <div class="panel-title">💬 CHAT <span id="chat-channel-hud" class="chat-channel">—</span></div>
+        <div id="chat-messages-hud" class="chat-messages"></div>
+        <div id="chat-quick-hud" class="chat-quick-row"></div>
+        <div class="chat-input-row">
+          <input id="chat-input-hud" maxlength="140" placeholder="Message your team…" autocomplete="off" />
+          <button id="chat-send-hud" class="btn tiny" aria-label="Send">➤</button>
+        </div>
+      </div>
+    </div>
+
     <div id="center-banner" class="center-banner hidden"></div>
     <div id="blindfold" class="blindfold hidden">
       <div class="bf-inner">
@@ -178,6 +206,30 @@
       <div class="modal-actions">
         <button id="btn-close-settings" class="btn">CLOSE</button>
         <button id="btn-leave-2" class="btn danger">LEAVE ROOM</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= CONTROLS MODAL (Feature 6) ================= -->
+  <div id="modal-controls" class="modal hidden">
+    <div class="modal-card modal-card-wide">
+      <div class="panel-title">🕹 CONTROLS</div>
+      <div class="settings-grid" id="controls-settings"></div>
+      <div class="controls-preview">
+        <div class="controls-preview-lbl">Drag buttons to reposition:</div>
+        <div id="controls-preview-area" class="controls-preview-area">
+          <div class="cp-btn cp-sprint" data-cp="sprint">🏃</div>
+          <div class="cp-btn cp-jump" data-cp="jump">⬆</div>
+          <div class="cp-btn cp-find" data-cp="find">🔎</div>
+          <div class="cp-btn cp-mic" data-cp="mic">🎤</div>
+          <div class="cp-btn cp-scan" data-cp="scan">📡</div>
+        </div>
+        <button id="btn-controls-reset" class="btn tiny">↺ RESET POSITIONS</button>
+      </div>
+      <div class="hint" id="controls-code-hint"></div>
+      <div class="modal-actions">
+        <button id="btn-controls-close" class="btn">CLOSE</button>
+        <button id="btn-controls-save" class="btn primary">SAVE</button>
       </div>
     </div>
   </div>

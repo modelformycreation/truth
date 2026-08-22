@@ -51,6 +51,10 @@ export const EVENTS = {
   VOICE_SIGNAL: 'voice:signal',
   VOICE_TALK: 'voice:talk',
   VOICE_MUTED: 'voice:muted',
+  CHAT_SEND: 'chat:send',
+  CHAT_RECV: 'chat:recv',
+  CONTROLS_GET: 'controls:get',
+  CONTROLS_SAVE: 'controls:save',
   TIME_SYNC: 'time:sync',
 
   // server -> client
@@ -71,6 +75,7 @@ export const EVENTS = {
   VOICE_SIGNAL: 'voice:signal',
   VOICE_TALK: 'voice:talk',
   VOICE_MUTED: 'voice:muted',
+  CHAT_RECV: 'chat:recv',
   TIME_SYNC_RESP: 'time:syncResp',
 };
 
